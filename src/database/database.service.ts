@@ -106,7 +106,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   revokeConsent(
     scopeType: 'visitor' | 'lead',
     scopeKey: string,
-    consentVersion?: number,
+    consentVersion: number,
   ): number {
     return this.store.revokeConsent(scopeType, scopeKey, consentVersion);
   }
@@ -114,9 +114,23 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   grantConsent(
     scopeType: 'visitor' | 'lead',
     scopeKey: string,
-    consentVersion?: number,
+    consentVersion: number,
   ): boolean {
     return this.store.grantConsent(scopeType, scopeKey, consentVersion);
+  }
+
+  cancelPendingForScope(
+    scopeType: 'visitor' | 'lead',
+    scopeKey: string,
+  ): number {
+    return this.store.cancelPendingForScope(scopeType, scopeKey);
+  }
+
+  getConsentVersion(
+    scopeType: 'visitor' | 'lead',
+    scopeKey: string,
+  ): number | null {
+    return this.store.getConsentVersion(scopeType, scopeKey);
   }
 
   isConsentRevoked(opts: {

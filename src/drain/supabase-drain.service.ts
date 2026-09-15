@@ -279,6 +279,32 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
     return rows[0]?.meta_ads_consent === false;
   }
 
+  /** Versión persistida en ledger Supabase; nunca inventa Date.now(). */
+  private async fetchLatestLedgerVersion(opts: {
+    leadId?: string | null;
+    visitorKey?: string | null;
+    adsConsent?: boolean;
+  }): Promise<number | null> {
+    const params = new URLSearchParams({
+      select: 'consent_version',
+      order: 'consent_version.desc',
+      limit: '1',
+    });
+    if (opts.leadId) params.set('lead_id', `eq.${opts.leadId}`);
+    else if (opts.visitorKey) params.set('visitor_key', `eq.${opts.visitorKey}`);
+    else return null;
+    if (typeof opts.adsConsent === 'boolean') {
+      params.set('ads_consent', `eq.${opts.adsConsent}`);
+    }
+    const res = await this.supabaseFetch(
+      `/rest/v1/meta_ads_consent_ledger?${params}`,
+    );
+    if (!res.ok) return null;
+    const rows = (await res.json()) as Array<{ consent_version: number }>;
+    const v = rows[0]?.consent_version;
+    return typeof v === 'number' && v >= 1 ? v : null;
+  }
+
   private async forwardRow(
     row: SupabaseOutboxRow,
   ): Promise<'forwarded' | 'cancelled' | 'failed'> {
@@ -295,7 +321,15 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
     if (row.ads_consent_required && row.lead_id) {
       if (await this.leadConsentFalse(row.lead_id)) {
         await this.markSupabase(row.id, 'cancelled', 'ads_consent_revoked');
-        this.db.revokeConsent('lead', row.lead_id);
+        const version = await this.fetchLatestLedgerVersion({
+          leadId: row.lead_id,
+          adsConsent: false,
+        });
+        if (version != null) {
+          this.db.revokeConsent('lead', row.lead_id, version);
+        } else {
+          this.db.cancelPendingForScope('lead', row.lead_id);
+        }
         return 'cancelled';
       }
     }

@@ -230,8 +230,11 @@ export class SqliteOutboxStore {
   revokeConsent(
     scopeType: 'visitor' | 'lead',
     scopeKey: string,
-    consentVersion = Date.now(),
+    consentVersion: number,
   ): number {
+    if (!Number.isFinite(consentVersion) || consentVersion < 1) {
+      throw new Error('consent_version_required');
+    }
     const key = scopeKey.trim();
     if (!key) return 0;
     const now = new Date().toISOString();
@@ -258,12 +261,52 @@ export class SqliteOutboxStore {
   grantConsent(
     scopeType: 'visitor' | 'lead',
     scopeKey: string,
-    consentVersion = Date.now(),
+    consentVersion: number,
   ): boolean {
+    if (!Number.isFinite(consentVersion) || consentVersion < 1) {
+      throw new Error('consent_version_required');
+    }
     const key = scopeKey.trim();
     if (!key) return false;
     const now = new Date().toISOString();
     return this.applyConsentState(scopeType, key, true, consentVersion, now);
+  }
+
+  /** Cancela pendientes sin tocar consent_state (sin inventar versión). */
+  cancelPendingForScope(
+    scopeType: 'visitor' | 'lead',
+    scopeKey: string,
+  ): number {
+    const key = scopeKey.trim();
+    if (!key) return 0;
+    const result = this.db
+      .prepare(
+        `UPDATE outbox_events
+         SET status = 'cancelled',
+             last_error = 'ads_consent_revoked',
+             updated_at = datetime('now')
+         WHERE status IN ('pending', 'failed', 'processing')
+           AND ads_consent_required = 1
+           AND (
+             (? = 'visitor' AND visitor_key = ?)
+             OR (? = 'lead' AND lead_id = ?)
+           )`,
+      )
+      .run(scopeType, key, scopeType, key);
+    return result.changes;
+  }
+
+  getConsentVersion(
+    scopeType: 'visitor' | 'lead',
+    scopeKey: string,
+  ): number | null {
+    const row = this.db
+      .prepare(
+        `SELECT consent_version FROM consent_state
+         WHERE scope_type = ? AND scope_key = ?`,
+      )
+      .get(scopeType, scopeKey) as { consent_version: number } | undefined;
+    return row ? Number(row.consent_version) : null;
   }
 
   /** Solo aplica si consent_version >= la ya registrada (anti-grant atrasado). */
