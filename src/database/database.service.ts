@@ -74,12 +74,25 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     return this.store.claimPending(limit, deliveryLane);
   }
 
-  markSent(id: number, metaResponseRedacted: unknown) {
-    this.store.markSent(id, metaResponseRedacted);
+  markSent(id: number, metaResponseRedacted: unknown): boolean {
+    return this.store.markSent(id, metaResponseRedacted);
   }
 
-  markRetry(id: number, error: string, nextAttemptAt: string, dead: boolean) {
-    this.store.markRetry(id, error, nextAttemptAt, dead);
+  markRetry(
+    id: number,
+    error: string,
+    nextAttemptAt: string,
+    dead: boolean,
+  ): boolean {
+    return this.store.markRetry(id, error, nextAttemptAt, dead);
+  }
+
+  getOutboxById(id: number) {
+    return this.store.getOutboxById(id);
+  }
+
+  cancelProcessingIfRevoked(id: number): boolean {
+    return this.store.cancelProcessingIfRevoked(id);
   }
 
   countsByStatus(): Record<string, number> {
@@ -90,12 +103,20 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     this.store.purgeOld(retentionDays);
   }
 
-  revokeConsent(scopeType: 'visitor' | 'lead', scopeKey: string): number {
-    return this.store.revokeConsent(scopeType, scopeKey);
+  revokeConsent(
+    scopeType: 'visitor' | 'lead',
+    scopeKey: string,
+    consentVersion?: number,
+  ): number {
+    return this.store.revokeConsent(scopeType, scopeKey, consentVersion);
   }
 
-  grantConsent(scopeType: 'visitor' | 'lead', scopeKey: string) {
-    this.store.grantConsent(scopeType, scopeKey);
+  grantConsent(
+    scopeType: 'visitor' | 'lead',
+    scopeKey: string,
+    consentVersion?: number,
+  ): boolean {
+    return this.store.grantConsent(scopeType, scopeKey, consentVersion);
   }
 
   isConsentRevoked(opts: {

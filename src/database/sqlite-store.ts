@@ -75,10 +75,12 @@ export class SqliteOutboxStore {
         expires_at TEXT NOT NULL
       );
 
-      CREATE TABLE IF NOT EXISTS consent_revocations (
+      CREATE TABLE IF NOT EXISTS consent_state (
         scope_type TEXT NOT NULL,
         scope_key TEXT NOT NULL,
-        revoked_at TEXT NOT NULL,
+        ads_allowed INTEGER NOT NULL,
+        consent_version INTEGER NOT NULL,
+        updated_at TEXT NOT NULL,
         PRIMARY KEY (scope_type, scope_key)
       );
     `);
@@ -127,6 +129,26 @@ export class SqliteOutboxStore {
     this.db
       .prepare(
         `INSERT OR IGNORE INTO schema_migrations (id) VALUES ('005_worker_locks')`,
+      )
+      .run();
+
+    // Migrar consent_revocations legacy → consent_state versionado
+    const tables = this.db
+      .prepare(`SELECT name FROM sqlite_master WHERE type='table'`)
+      .all() as Array<{ name: string }>;
+    const tableNames = new Set(tables.map((t) => t.name));
+    if (tableNames.has('consent_revocations') && tableNames.has('consent_state')) {
+      this.db.exec(`
+        INSERT OR IGNORE INTO consent_state (scope_type, scope_key, ads_allowed, consent_version, updated_at)
+        SELECT scope_type, scope_key, 0,
+               CAST(strftime('%s', revoked_at) AS INTEGER) * 1000,
+               revoked_at
+        FROM consent_revocations;
+      `);
+    }
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO schema_migrations (id) VALUES ('006_consent_state_versioned')`,
       )
       .run();
   }
@@ -205,17 +227,16 @@ export class SqliteOutboxStore {
       .run(expiresAtIso, lockName);
   }
 
-  revokeConsent(scopeType: 'visitor' | 'lead', scopeKey: string): number {
+  revokeConsent(
+    scopeType: 'visitor' | 'lead',
+    scopeKey: string,
+    consentVersion = Date.now(),
+  ): number {
     const key = scopeKey.trim();
     if (!key) return 0;
     const now = new Date().toISOString();
-    this.db
-      .prepare(
-        `INSERT INTO consent_revocations (scope_type, scope_key, revoked_at)
-         VALUES (?, ?, ?)
-         ON CONFLICT(scope_type, scope_key) DO UPDATE SET revoked_at = excluded.revoked_at`,
-      )
-      .run(scopeType, key, now);
+    const applied = this.applyConsentState(scopeType, key, false, consentVersion, now);
+    if (!applied) return 0;
 
     const result = this.db
       .prepare(
@@ -234,14 +255,48 @@ export class SqliteOutboxStore {
     return result.changes;
   }
 
-  grantConsent(scopeType: 'visitor' | 'lead', scopeKey: string): void {
+  grantConsent(
+    scopeType: 'visitor' | 'lead',
+    scopeKey: string,
+    consentVersion = Date.now(),
+  ): boolean {
     const key = scopeKey.trim();
-    if (!key) return;
+    if (!key) return false;
+    const now = new Date().toISOString();
+    return this.applyConsentState(scopeType, key, true, consentVersion, now);
+  }
+
+  /** Solo aplica si consent_version >= la ya registrada (anti-grant atrasado). */
+  private applyConsentState(
+    scopeType: 'visitor' | 'lead',
+    scopeKey: string,
+    adsAllowed: boolean,
+    consentVersion: number,
+    updatedAt: string,
+  ): boolean {
+    const existing = this.db
+      .prepare(
+        `SELECT consent_version FROM consent_state
+         WHERE scope_type = ? AND scope_key = ?`,
+      )
+      .get(scopeType, scopeKey) as { consent_version: number } | undefined;
+
+    if (existing && Number(existing.consent_version) > Number(consentVersion)) {
+      return false;
+    }
+
     this.db
       .prepare(
-        `DELETE FROM consent_revocations WHERE scope_type = ? AND scope_key = ?`,
+        `INSERT INTO consent_state (scope_type, scope_key, ads_allowed, consent_version, updated_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(scope_type, scope_key) DO UPDATE SET
+           ads_allowed = excluded.ads_allowed,
+           consent_version = excluded.consent_version,
+           updated_at = excluded.updated_at
+         WHERE excluded.consent_version >= consent_state.consent_version`,
       )
-      .run(scopeType, key);
+      .run(scopeType, scopeKey, adsAllowed ? 1 : 0, consentVersion, updatedAt);
+    return true;
   }
 
   isConsentRevoked(opts: {
@@ -251,20 +306,20 @@ export class SqliteOutboxStore {
     if (opts.leadId) {
       const row = this.db
         .prepare(
-          `SELECT 1 AS ok FROM consent_revocations
+          `SELECT ads_allowed FROM consent_state
            WHERE scope_type = 'lead' AND scope_key = ?`,
         )
-        .get(opts.leadId);
-      if (row) return true;
+        .get(opts.leadId) as { ads_allowed: number } | undefined;
+      if (row && row.ads_allowed === 0) return true;
     }
     if (opts.visitorKey) {
       const row = this.db
         .prepare(
-          `SELECT 1 AS ok FROM consent_revocations
+          `SELECT ads_allowed FROM consent_state
            WHERE scope_type = 'visitor' AND scope_key = ?`,
         )
-        .get(opts.visitorKey);
-      if (row) return true;
+        .get(opts.visitorKey) as { ads_allowed: number } | undefined;
+      if (row && row.ads_allowed === 0) return true;
     }
     return false;
   }
@@ -428,8 +483,14 @@ export class SqliteOutboxStore {
     return tx();
   }
 
-  markSent(id: number, metaResponseRedacted: unknown) {
-    this.db
+  getOutboxById(id: number): OutboxRow | undefined {
+    return this.db
+      .prepare(`SELECT * FROM outbox_events WHERE id = ?`)
+      .get(id) as OutboxRow | undefined;
+  }
+
+  markSent(id: number, metaResponseRedacted: unknown): boolean {
+    const result = this.db
       .prepare(
         `UPDATE outbox_events
          SET status = 'sent',
@@ -437,20 +498,26 @@ export class SqliteOutboxStore {
              updated_at = datetime('now'),
              last_error = NULL,
              meta_response_redacted = @meta
-         WHERE id = @id`,
+         WHERE id = @id AND status = 'processing'`,
       )
       .run({ id, meta: JSON.stringify(metaResponseRedacted) });
+    return result.changes === 1;
   }
 
-  markRetry(id: number, error: string, nextAttemptAt: string, dead: boolean) {
-    this.db
+  markRetry(
+    id: number,
+    error: string,
+    nextAttemptAt: string,
+    dead: boolean,
+  ): boolean {
+    const result = this.db
       .prepare(
         `UPDATE outbox_events
          SET status = @status,
              last_error = @error,
              next_attempt_at = @next,
              updated_at = datetime('now')
-         WHERE id = @id`,
+         WHERE id = @id AND status = 'processing'`,
       )
       .run({
         id,
@@ -458,6 +525,20 @@ export class SqliteOutboxStore {
         error: error.slice(0, 500),
         next: nextAttemptAt,
       });
+    return result.changes === 1;
+  }
+
+  cancelProcessingIfRevoked(id: number): boolean {
+    const result = this.db
+      .prepare(
+        `UPDATE outbox_events
+         SET status = 'cancelled',
+             last_error = 'ads_consent_revoked',
+             updated_at = datetime('now')
+         WHERE id = ? AND status = 'processing'`,
+      )
+      .run(id);
+    return result.changes === 1;
   }
 
   countsByStatus(): Record<string, number> {

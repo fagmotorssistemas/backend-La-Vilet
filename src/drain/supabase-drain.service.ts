@@ -111,6 +111,7 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
 
     try {
       await this.recoverMissingLeadOutbox();
+      await this.drainConsentLedger();
       const batch = Number(this.config.get('SUPABASE_DRAIN_BATCH_SIZE')) || 20;
       const lane = this.meta.mode === 'test' ? 'test' : 'live';
       const rows = await this.fetchPending(batch, lane);
@@ -159,6 +160,74 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
         ...(init?.headers || {}),
       },
     });
+  }
+
+  private async drainConsentLedger() {
+    const qs = new URLSearchParams({
+      select: 'id,visitor_key,lead_id,ads_consent,consent_version,nest_status,nest_attempts',
+      nest_status: 'in.(pending,failed)',
+      order: 'consent_version.asc',
+      limit: '20',
+    });
+    const res = await this.supabaseFetch(`/rest/v1/meta_ads_consent_ledger?${qs}`);
+    if (!res.ok) {
+      if (res.status !== 404) {
+        this.logger.warn(`consent_ledger_fetch http=${res.status}`);
+      }
+      return;
+    }
+    const rows = (await res.json()) as Array<{
+      id: string;
+      visitor_key: string | null;
+      lead_id: string | null;
+      ads_consent: boolean;
+      consent_version: number;
+    }>;
+
+    for (const row of rows) {
+      const version = Number(row.consent_version);
+      try {
+        if (row.ads_consent) {
+          if (row.lead_id) this.db.grantConsent('lead', row.lead_id, version);
+          if (row.visitor_key) {
+            this.db.grantConsent('visitor', row.visitor_key, version);
+          }
+        } else {
+          if (row.lead_id) this.db.revokeConsent('lead', row.lead_id, version);
+          if (row.visitor_key) {
+            this.db.revokeConsent('visitor', row.visitor_key, version);
+          }
+        }
+        await this.markConsentLedger(row.id, 'delivered', null);
+      } catch (error) {
+        await this.markConsentLedger(
+          row.id,
+          'failed',
+          error instanceof Error ? error.message.slice(0, 200) : 'consent_drain_failed',
+        );
+      }
+    }
+  }
+
+  private async markConsentLedger(
+    id: string,
+    status: 'delivered' | 'failed',
+    lastError: string | null,
+  ) {
+    const res = await this.supabaseFetch(
+      `/rest/v1/meta_ads_consent_ledger?id=eq.${id}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({
+          nest_status: status,
+          last_error: lastError,
+          updated_at: new Date().toISOString(),
+        }),
+      },
+    );
+    if (!res.ok) {
+      this.logger.warn(`mark_consent_ledger http=${res.status}`);
+    }
   }
 
   private async recoverMissingLeadOutbox() {

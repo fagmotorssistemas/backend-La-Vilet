@@ -97,10 +97,14 @@ describe('SqliteOutboxStore comportamiento', () => {
       });
 
       const cancelled =
-        store.revokeConsent('visitor', visitor) +
-        store.revokeConsent('lead', leadId);
+        store.revokeConsent('visitor', visitor, 200) +
+        store.revokeConsent('lead', leadId, 200);
       expect(cancelled).toBeGreaterThanOrEqual(2);
       expect(store.claimPending(10, 'live')).toHaveLength(0);
+
+      // Grant atrasado no reactiva
+      expect(store.grantConsent('visitor', visitor, 100)).toBe(false);
+      expect(store.isConsentRevoked({ visitorKey: visitor })).toBe(true);
 
       const late = store.insertOutbox({
         idempotency_key: 'late-lead',
@@ -116,7 +120,35 @@ describe('SqliteOutboxStore comportamiento', () => {
       });
       expect(late.blocked_by_consent).toBe(true);
       expect(late.row.status).toBe('cancelled');
-      expect(store.claimPending(10, 'live')).toHaveLength(0);
+    } finally {
+      close();
+    }
+  });
+
+  it('markSent/markRetry no sobrescriben cancelación concurrente', () => {
+    const { store, close } = tempDb();
+    try {
+      store.insertOutbox({
+        idempotency_key: 'proc-1',
+        event_id: '99999999-9999-4999-8999-999999999999',
+        event_name: 'Lead',
+        event_time: 1_700_000_200,
+        payload_redacted: {},
+        graph_payload: { data: [] },
+        dataset_id: 'ds',
+        delivery_lane: 'live',
+        visitor_key: 'v-x',
+        lead_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      });
+      const claimed = store.claimPending(1, 'live');
+      expect(claimed).toHaveLength(1);
+      store.revokeConsent('visitor', 'v-x', Date.now());
+      store.cancelProcessingIfRevoked(claimed[0].id);
+      expect(store.markSent(claimed[0].id, { ok: true })).toBe(false);
+      expect(store.markRetry(claimed[0].id, 'x', new Date().toISOString(), false)).toBe(
+        false,
+      );
+      expect(store.getOutboxById(claimed[0].id)?.status).toBe('cancelled');
     } finally {
       close();
     }

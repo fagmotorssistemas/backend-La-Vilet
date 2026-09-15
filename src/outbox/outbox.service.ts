@@ -70,28 +70,44 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
       const batch = Number(this.config.get('OUTBOX_BATCH_SIZE')) || 20;
       const maxAttempts = Number(this.config.get('OUTBOX_MAX_ATTEMPTS')) || 8;
       const lane = this.meta.mode === 'test' ? 'test' : 'live';
-      // Solo claim de la lane del META_MODE actual (test ≠ live).
       const claimed = this.db.claimPending(batch, lane);
 
       for (const row of claimed) {
-        const payload = JSON.parse(row.graph_payload) as Record<
+        // Revalidar estado + consentimiento inmediatamente antes de enviar.
+        const fresh = this.db.getOutboxById(row.id);
+        if (!fresh || fresh.status !== 'processing') {
+          continue;
+        }
+        if (
+          fresh.ads_consent_required &&
+          this.db.isConsentRevoked({
+            visitorKey: fresh.visitor_key,
+            leadId: fresh.lead_id,
+          })
+        ) {
+          this.db.cancelProcessingIfRevoked(row.id);
+          continue;
+        }
+
+        const payload = JSON.parse(fresh.graph_payload) as Record<
           string,
           unknown
         >;
-        // Ajustar test_event_code al modo actual (no al momento del enqueue).
         if (this.meta.mode === 'test' && this.meta.testEventCode) {
           payload.test_event_code = this.meta.testEventCode;
         } else {
           delete payload.test_event_code;
         }
-        const result = await this.meta.sendToMeta(row.dataset_id, payload);
 
+        const result = await this.meta.sendToMeta(fresh.dataset_id, payload);
+
+        // Tras await: no sobrescribir si se canceló concurrentemente.
         if (result.ok) {
           this.db.markSent(row.id, result.bodyRedacted);
           continue;
         }
 
-        const attempts = row.attempt_count;
+        const attempts = fresh.attempt_count;
         const dead = !result.retryable || attempts >= maxAttempts;
         const backoffSec = Math.min(
           3600,
