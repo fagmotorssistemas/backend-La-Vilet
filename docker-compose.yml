@@ -4,7 +4,8 @@ services:
     build: .
     image: lavilet-meta-capi:local
     ports:
-      - "${PORT:-3010}:3010"
+      # Solo loopback en el host (no exponer 0.0.0.0). App Platform usa el Dockerfile.
+      - "127.0.0.1:${PORT:-3010}:3010"
     environment:
       PORT: 3010
       META_MODE: ${META_MODE:-disabled}
