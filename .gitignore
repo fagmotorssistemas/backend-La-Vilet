@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+
+# Build
+dist/
+coverage/
+
+# Env & secrets
+.env
+.env.local
+.env.*.local
+
+# Runtime data
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# Logs & OS
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp

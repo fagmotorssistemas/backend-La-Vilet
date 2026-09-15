@@ -1,0 +1,2 @@
+-- Recuperación documentada en código (DatabaseService.recoverStuckProcessing).
+-- Tras crash/reinicio: status processing → pending, conservando event_id y event_time.

@@ -1,0 +1,43 @@
+# Desarrollo / Droplet local. En App Platform usar Dockerfile + volumen /data.
+services:
+  lavilet-meta-capi:
+    build: .
+    image: lavilet-meta-capi:local
+    ports:
+      - "${PORT:-3010}:3010"
+    environment:
+      PORT: 3010
+      META_MODE: ${META_MODE:-disabled}
+      META_DATASET_ID: ${META_DATASET_ID:-923439043758658}
+      META_PIXEL_ID: ${META_PIXEL_ID:-923439043758658}
+      META_API_VERSION: ${META_API_VERSION:-v21.0}
+      META_CAPI_ACCESS_TOKEN: ${META_CAPI_ACCESS_TOKEN:-}
+      META_TEST_EVENT_CODE: ${META_TEST_EVENT_CODE:-}
+      META_CAPI_INTERNAL_SECRET: ${META_CAPI_INTERNAL_SECRET:?set META_CAPI_INTERNAL_SECRET}
+      CORS_ORIGINS: ${CORS_ORIGINS:-https://www.lavilett.com,https://lavilett.com}
+      DATABASE_PATH: /data/lavilet-meta-capi.db
+      OUTBOX_ENABLED: ${OUTBOX_ENABLED:-true}
+      OUTBOX_POLL_MS: ${OUTBOX_POLL_MS:-5000}
+      OUTBOX_BATCH_SIZE: ${OUTBOX_BATCH_SIZE:-20}
+      OUTBOX_MAX_ATTEMPTS: ${OUTBOX_MAX_ATTEMPTS:-8}
+      OUTBOX_RETENTION_DAYS: ${OUTBOX_RETENTION_DAYS:-90}
+      META_HTTP_TIMEOUT_MS: ${META_HTTP_TIMEOUT_MS:-10000}
+    volumes:
+      # Persistencia de la cola outbox (sobrevive reinicios)
+      - lavilet_capi_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3010/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 25s
+
+volumes:
+  lavilet_capi_data:
