@@ -74,16 +74,26 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
   }
 
   onModuleInit() {
-    if (this.config.get<string>('SUPABASE_DRAIN_ENABLED') === 'false') {
-      this.logger.log('Supabase drain deshabilitado (SUPABASE_DRAIN_ENABLED=false)');
-      return;
-    }
-    if (!this.isConfigured()) {
-      this.logger.warn(
-        'Supabase drain inactivo: faltan SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY',
+    const raw = String(
+      this.config.get<string>('SUPABASE_DRAIN_ENABLED') || '',
+    )
+      .trim()
+      .toLowerCase();
+    const drainOn = raw === 'true' || raw === '1';
+
+    if (!drainOn) {
+      this.logger.log(
+        'Supabase drain deshabilitado (SUPABASE_DRAIN_ENABLED no es true)',
       );
       return;
     }
+
+    if (!this.isConfigured()) {
+      throw new Error(
+        'SUPABASE_DRAIN_ENABLED=true requiere SUPABASE_URL y SUPABASE_SERVICE_ROLE_KEY',
+      );
+    }
+
     this.enabled = true;
     const poll = Number(this.config.get('SUPABASE_DRAIN_POLL_MS')) || 15000;
     this.timer = setInterval(() => void this.tick(), poll);

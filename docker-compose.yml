@@ -1,4 +1,7 @@
+# Compose file format 3.8 — compatible con docker-compose 1.29.2
 # Desarrollo / Droplet local. En App Platform usar Dockerfile + volumen /data.
+version: "3.8"
+
 services:
   lavilet-meta-capi:
     build: .
@@ -23,6 +26,13 @@ services:
       OUTBOX_MAX_ATTEMPTS: ${OUTBOX_MAX_ATTEMPTS:-8}
       OUTBOX_RETENTION_DAYS: ${OUTBOX_RETENTION_DAYS:-90}
       META_HTTP_TIMEOUT_MS: ${META_HTTP_TIMEOUT_MS:-10000}
+      # Drain off por defecto: arranca sin Supabase. Si true, exige URL + service role.
+      SUPABASE_DRAIN_ENABLED: ${SUPABASE_DRAIN_ENABLED:-false}
+      SUPABASE_DRAIN_POLL_MS: ${SUPABASE_DRAIN_POLL_MS:-15000}
+      SUPABASE_DRAIN_BATCH_SIZE: ${SUPABASE_DRAIN_BATCH_SIZE:-20}
+      SUPABASE_DRAIN_LOCK_TTL_MS: ${SUPABASE_DRAIN_LOCK_TTL_MS:-60000}
+      SUPABASE_URL: ${SUPABASE_URL:-}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:-}
     volumes:
       # Persistencia de la cola outbox (sobrevive reinicios)
       - lavilet_capi_data:/data
