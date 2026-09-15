@@ -1,4 +1,4 @@
-import { Body, Controller, HttpCode, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, HttpCode, Post, UseGuards, BadRequestException } from '@nestjs/common';
 import {
   IsInt,
   IsOptional,
@@ -20,11 +20,10 @@ class ConsentScopeDto {
   @MaxLength(128)
   visitor_key?: string;
 
-  /** Orden monotónico: grant atrasado no pisa revoke posterior. */
-  @IsOptional()
+  /** Obligatorio: orden monotónico desde secuencia Supabase. */
   @IsInt()
   @Min(1)
-  consent_version?: number;
+  consent_version!: number;
 }
 
 @Controller('v1/consent')
@@ -35,22 +34,19 @@ export class ConsentController {
   @Post('revoke')
   @HttpCode(202)
   revoke(@Body() body: ConsentScopeDto) {
-    const version = body.consent_version ?? Date.now();
+    if (!body.consent_version) {
+      throw new BadRequestException('consent_version requerido');
+    }
+    const version = body.consent_version;
     let cancelled = 0;
-    let applied = false;
     if (body.lead_id) {
-      const n = this.db.revokeConsent('lead', body.lead_id, version);
-      cancelled += n;
-      applied = true;
+      cancelled += this.db.revokeConsent('lead', body.lead_id, version);
     }
     if (body.visitor_key) {
-      const n = this.db.revokeConsent('visitor', body.visitor_key, version);
-      cancelled += n;
-      applied = true;
+      cancelled += this.db.revokeConsent('visitor', body.visitor_key, version);
     }
     return {
       ok: true,
-      applied,
       cancelled,
       consent_version: version,
       lead_id: body.lead_id || null,
@@ -61,7 +57,10 @@ export class ConsentController {
   @Post('grant')
   @HttpCode(202)
   grant(@Body() body: ConsentScopeDto) {
-    const version = body.consent_version ?? Date.now();
+    if (!body.consent_version) {
+      throw new BadRequestException('consent_version requerido');
+    }
+    const version = body.consent_version;
     const results: { scope: string; applied: boolean }[] = [];
     if (body.lead_id) {
       results.push({
