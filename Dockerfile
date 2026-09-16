@@ -32,6 +32,7 @@ COPY --from=build --chown=nestjs:nestjs /app/dist ./dist
 COPY --from=build --chown=nestjs:nestjs /app/node_modules ./node_modules
 COPY --from=build --chown=nestjs:nestjs /app/package.json ./package.json
 COPY --from=build --chown=nestjs:nestjs /app/migrations ./migrations
+COPY --from=build --chown=nestjs:nestjs /app/scripts/cancel-outbox-by-event-id.mjs ./scripts/cancel-outbox-by-event-id.mjs
 
 USER nestjs
 EXPOSE 3010
