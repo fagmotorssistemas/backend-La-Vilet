@@ -92,12 +92,12 @@ export function hashExternalId(raw: unknown): string | null {
 }
 
 /**
- * Parte un nombre completo en fn/ln para Meta (LatAm).
+ * Parte un full_name solo cuando la separación es inequívoca.
  * - 1 token → solo fn
  * - 2 tokens → nombre + apellido
- * - 3+ tokens → nombres de pila (todo menos los 2 últimos) + dos apellidos
- *   (p. ej. "Juan Diego Aguirre Armijos" → fn="Juan Diego", ln="Aguirre Armijos").
- * No asume "primera palabra = nombre / resto = apellido" en nombres compuestos.
+ * - 3+ tokens → no inferir (nombres compuestos vs dos apellidos vs apellidos compuestos
+ *   son ambiguos; p. ej. "María José Pérez" o "Pérez de la Cruz")
+ * Preferir siempre first_name/last_name separados vía buildHashedUserData.
  */
 export function splitFullName(raw: unknown): {
   firstName: string | null;
@@ -111,10 +111,7 @@ export function splitFullName(raw: unknown): {
   if (parts.length === 2) {
     return { firstName: parts[0], lastName: parts[1] };
   }
-  return {
-    firstName: parts.slice(0, -2).join(' '),
-    lastName: parts.slice(-2).join(' '),
-  };
+  return { firstName: null, lastName: null };
 }
 
 export function newEventId(): string {
@@ -139,6 +136,7 @@ export function buildHashedUserData(
   const em = hashEmail(input.email);
   const ph = hashPhone(input.phone);
 
+  // Campos separados tienen prioridad; no completar huecos desde fullName.
   let firstName = asTrimmedString(input.firstName);
   let lastName = asTrimmedString(input.lastName);
   if (!firstName && !lastName && input.fullName) {

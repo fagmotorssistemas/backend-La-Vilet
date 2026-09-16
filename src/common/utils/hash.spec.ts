@@ -36,32 +36,53 @@ describe('hash + phone', () => {
     expect(data.external_id).toBeDefined();
   });
 
-  it('parte full_name con nombres compuestos y dos apellidos', () => {
+  it('prioriza first/last separados y no infiere full_name ambiguo', () => {
     expect(splitFullName('Juan Pérez')).toEqual({
       firstName: 'Juan',
       lastName: 'Pérez',
     });
-    expect(splitFullName('Juan Diego Aguirre Armijos')).toEqual({
-      firstName: 'Juan Diego',
-      lastName: 'Aguirre Armijos',
-    });
-    expect(splitFullName('María José García López')).toEqual({
-      firstName: 'María José',
-      lastName: 'García López',
-    });
-    // Tres tokens: en LatAm suele ser nombre + dos apellidos
-    expect(splitFullName('Ana Pérez García')).toEqual({
+    expect(splitFullName('Ana')).toEqual({
       firstName: 'Ana',
-      lastName: 'Pérez García',
+      lastName: null,
     });
-    const data = buildHashedUserData({
-      fullName: 'Juan Diego Aguirre Armijos',
+
+    // 3+ tokens: no asumir "últimas dos = apellidos"
+    expect(splitFullName('María José Pérez')).toEqual({
+      firstName: null,
+      lastName: null,
+    });
+    expect(splitFullName('Juan Diego Aguirre Armijos')).toEqual({
+      firstName: null,
+      lastName: null,
+    });
+    expect(splitFullName('María Pérez de la Cruz')).toEqual({
+      firstName: null,
+      lastName: null,
+    });
+
+    const fromFull = buildHashedUserData({
+      fullName: 'María José Pérez',
       phone: '0991234567',
-      country: 'EC',
     });
-    expect(data.fn).toEqual([hashNamePart('Juan Diego')]);
-    expect(data.ln).toEqual([hashNamePart('Aguirre Armijos')]);
-    // No debe hashear el nombre completo concatenado como un solo fn
-    expect(data.fn?.[0]).not.toEqual(hashNamePart('Juan Diego Aguirre Armijos'));
+    expect(fromFull.fn).toBeUndefined();
+    expect(fromFull.ln).toBeUndefined();
+    expect(fromFull.ph).toBeDefined();
+
+    const separated = buildHashedUserData({
+      firstName: 'María José',
+      lastName: 'Pérez',
+      fullName: 'María José Pérez algo extra',
+      phone: '0991234567',
+    });
+    expect(separated.fn).toEqual([hashNamePart('María José')]);
+    expect(separated.ln).toEqual([hashNamePart('Pérez')]);
+
+    // Un solo campo separado: no completar el otro desde fullName
+    const onlyFirst = buildHashedUserData({
+      firstName: 'María José',
+      fullName: 'María José Pérez',
+    });
+    expect(onlyFirst.fn).toEqual([hashNamePart('María José')]);
+    expect(onlyFirst.ln).toBeUndefined();
   });
 });
