@@ -28,6 +28,7 @@ export class HealthController {
       token_configured: Boolean(this.meta.accessToken),
       delivery_enabled: gate.ok,
       delivery_reason: gate.ok ? null : gate.reason,
+      core_setup_conservative: this.meta.coreSetupConservative,
       persistence: {
         database_path: this.db.databasePath,
       },

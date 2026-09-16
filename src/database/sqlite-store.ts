@@ -584,6 +584,39 @@ export class SqliteOutboxStore {
     return result.changes === 1;
   }
 
+  /**
+   * Cancela por event_id sin borrar la fila (conserva registro / graph_payload).
+   * Afecta pending|failed|processing|dead — no sent ni ya cancelled.
+   */
+  cancelByEventIds(
+    eventIds: string[],
+    reason = 'core_setup_hold',
+  ): { updated: number; rows: Array<{ id: number; event_id: string; status: string }> } {
+    const ids = [...new Set(eventIds.map((e) => e.trim()).filter(Boolean))];
+    if (!ids.length) return { updated: 0, rows: [] };
+
+    const placeholders = ids.map(() => '?').join(',');
+    const before = this.db
+      .prepare(
+        `SELECT id, event_id, status FROM outbox_events
+         WHERE event_id IN (${placeholders})`,
+      )
+      .all(...ids) as Array<{ id: number; event_id: string; status: string }>;
+
+    const result = this.db
+      .prepare(
+        `UPDATE outbox_events
+         SET status = 'cancelled',
+             last_error = ?,
+             updated_at = datetime('now')
+         WHERE event_id IN (${placeholders})
+           AND status IN ('pending', 'failed', 'processing', 'dead')`,
+      )
+      .run(reason.slice(0, 500), ...ids);
+
+    return { updated: result.changes, rows: before };
+  }
+
   countsByStatus(): Record<string, number> {
     const rows = this.db
       .prepare(

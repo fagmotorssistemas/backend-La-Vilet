@@ -240,4 +240,52 @@ describe('SqliteOutboxStore comportamiento', () => {
       close();
     }
   });
+
+  it('cancelByEventIds marca cancelled sin borrar', () => {
+    const { store, close } = tempDb();
+    try {
+      store.insertOutbox({
+        idempotency_key: 'view:a',
+        event_id: '123ddc30-a6dc-4861-a87e-9ea22cebd313',
+        event_name: 'ViewContent',
+        event_time: 1_700_000_000,
+        payload_redacted: {},
+        graph_payload: {
+          data: [
+            {
+              event_id: '123ddc30-a6dc-4861-a87e-9ea22cebd313',
+              custom_data: { content_name: 'Unidad 208' },
+              event_source_url: 'https://preview.example/tour/u',
+            },
+          ],
+        },
+        dataset_id: 'ds',
+        delivery_lane: 'test',
+      });
+      store.insertOutbox({
+        idempotency_key: 'view:b',
+        event_id: '73332442-ad30-41cb-a84e-213062c81807',
+        event_name: 'ViewContent',
+        event_time: 1_700_000_001,
+        payload_redacted: {},
+        graph_payload: { data: [{ event_id: '73332442-ad30-41cb-a84e-213062c81807' }] },
+        dataset_id: 'ds',
+        delivery_lane: 'test',
+      });
+      const result = store.cancelByEventIds(
+        [
+          '123ddc30-a6dc-4861-a87e-9ea22cebd313',
+          '73332442-ad30-41cb-a84e-213062c81807',
+        ],
+        'core_setup_hold',
+      );
+      expect(result.updated).toBe(2);
+      expect(store.countsByStatus().cancelled).toBe(2);
+      expect(store.claimPending(10, 'test')).toHaveLength(0);
+      const stillThere = result.rows.length;
+      expect(stillThere).toBe(2);
+    } finally {
+      close();
+    }
+  });
 });

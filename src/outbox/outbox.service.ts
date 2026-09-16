@@ -89,10 +89,12 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
           continue;
         }
 
-        const payload = JSON.parse(fresh.graph_payload) as Record<
+        let payload = JSON.parse(fresh.graph_payload) as Record<
           string,
           unknown
         >;
+        // Core Setup: revalidar siempre antes de Graph (incluye cola antigua).
+        payload = this.meta.applyCoreSetupBeforeGraphSend(payload);
         if (this.meta.mode === 'test' && this.meta.testEventCode) {
           payload.test_event_code = this.meta.testEventCode;
         } else {

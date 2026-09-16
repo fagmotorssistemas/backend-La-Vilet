@@ -6,6 +6,11 @@ import {
   type MatchInput,
 } from '../common/utils/hash';
 import { isMetaSendSuccess } from './meta-success';
+import {
+  applyCoreSetupConservativeToGraphBody,
+  isCoreSetupConservativeEnabled,
+  originOnlyEventSourceUrl,
+} from './core-setup-conservative';
 
 export type MetaMode = 'disabled' | 'test' | 'live';
 export type MetaEventName = 'ViewContent' | 'Lead' | 'Schedule';
@@ -68,6 +73,13 @@ export class MetaCapiService {
     return code || null;
   }
 
+  /** Core Setup / configuración básica: sin custom_data; URL solo origen. */
+  get coreSetupConservative(): boolean {
+    return isCoreSetupConservativeEnabled(
+      this.config.get<string>('META_CORE_SETUP_CONSERVATIVE'),
+    );
+  }
+
   /**
    * Reglas de activación:
    * - disabled: no envía
@@ -102,23 +114,14 @@ export class MetaCapiService {
     if (!raw) return undefined;
     try {
       const url = new URL(raw);
-      // Quitar params sensibles
-      const blocked = [
-        'phone',
-        'tel',
-        'email',
-        'token',
-        'access_token',
-        'code',
-        'password',
-        'otp',
-      ];
-      for (const key of [...url.searchParams.keys()]) {
-        if (blocked.some((b) => key.toLowerCase().includes(b))) {
-          url.searchParams.delete(key);
-        }
+      if (/^\/simulador(?:\/|$)/i.test(url.pathname)) {
+        return undefined;
       }
-      // No dejar teléfonos/emails en path
+      if (this.coreSetupConservative) {
+        return originOnlyEventSourceUrl(url.toString());
+      }
+      url.search = '';
+      url.hash = '';
       if (/@|\d{8,}/.test(url.pathname)) {
         url.pathname = '/';
       }
@@ -126,6 +129,17 @@ export class MetaCapiService {
     } catch {
       return undefined;
     }
+  }
+
+  /**
+   * Revalida reglas Core Setup sobre un body Graph ya persistido (cola antigua).
+   * Idempotente; no toca Meta.
+   */
+  applyCoreSetupBeforeGraphSend(
+    body: Record<string, unknown>,
+  ): Record<string, unknown> {
+    if (!this.coreSetupConservative) return body;
+    return applyCoreSetupConservativeToGraphBody(body);
   }
 
   buildFbc(fbclid?: string | null, existingFbc?: string | null): string | null {
@@ -170,17 +184,23 @@ export class MetaCapiService {
       event.messaging_channel = input.messagingChannel || 'whatsapp';
     }
 
-    const custom: Record<string, unknown> = {};
-    if (input.contentIds?.length) custom.content_ids = input.contentIds;
-    if (input.contentName) custom.content_name = input.contentName;
-    if (input.contentCategory) custom.content_category = input.contentCategory;
-    if (input.ctwaClid) custom.ctwa_clid = input.ctwaClid;
-    // Sin value/currency artificial; sin content_type inventado
-    if (Object.keys(custom).length) event.custom_data = custom;
+    const conservative = this.coreSetupConservative;
+    if (!conservative) {
+      const custom: Record<string, unknown> = {};
+      if (input.contentIds?.length) custom.content_ids = input.contentIds;
+      if (input.contentName) custom.content_name = input.contentName;
+      if (input.contentCategory) custom.content_category = input.contentCategory;
+      if (input.ctwaClid) custom.ctwa_clid = input.ctwaClid;
+      // Sin value/currency artificial; sin content_type inventado
+      if (Object.keys(custom).length) event.custom_data = custom;
+    }
 
-    const payload: Record<string, unknown> = { data: [event] };
+    let payload: Record<string, unknown> = { data: [event] };
     if (this.mode === 'test' && this.testEventCode) {
       payload.test_event_code = this.testEventCode;
+    }
+    if (conservative) {
+      payload = applyCoreSetupConservativeToGraphBody(payload);
     }
 
     const redacted = {
@@ -194,9 +214,10 @@ export class MetaCapiService {
       has_ln: Boolean((userData as { ln?: unknown }).ln),
       has_fbp: Boolean(input.fbp),
       has_fbc: Boolean(input.fbc),
-      content_ids: input.contentIds || null,
-      content_name: input.contentName || null,
-      content_category: input.contentCategory || null,
+      content_ids: conservative ? null : input.contentIds || null,
+      content_name: conservative ? null : input.contentName || null,
+      content_category: conservative ? null : input.contentCategory || null,
+      core_setup_conservative: conservative,
       test_mode: this.mode === 'test',
     };
 

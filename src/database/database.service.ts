@@ -95,6 +95,10 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     return this.store.cancelProcessingIfRevoked(id);
   }
 
+  cancelByEventIds(eventIds: string[], reason?: string) {
+    return this.store.cancelByEventIds(eventIds, reason);
+  }
+
   countsByStatus(): Record<string, number> {
     return this.store.countsByStatus();
   }
