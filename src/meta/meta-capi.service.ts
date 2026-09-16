@@ -212,6 +212,13 @@ export class MetaCapiService {
       has_ph: Boolean((userData as { ph?: unknown }).ph),
       has_fn: Boolean((userData as { fn?: unknown }).fn),
       has_ln: Boolean((userData as { ln?: unknown }).ln),
+      has_ct: Boolean((userData as { ct?: unknown }).ct),
+      has_country: Boolean((userData as { country?: unknown }).country),
+      has_external_id: Boolean(
+        (userData as { external_id?: unknown }).external_id,
+      ),
+      has_client_ip: Boolean(input.clientIpAddress),
+      has_client_ua: Boolean(input.clientUserAgent),
       has_fbp: Boolean(input.fbp),
       has_fbc: Boolean(input.fbc),
       content_ids: conservative ? null : input.contentIds || null,

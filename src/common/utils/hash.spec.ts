@@ -2,7 +2,9 @@ import {
   normalizePhoneE164Digits,
   hashEmail,
   hashPhone,
+  hashNamePart,
   buildHashedUserData,
+  splitFullName,
 } from './hash';
 import { isLikelyArtificialEmail, isLikelyArtificialName } from './phone';
 
@@ -32,5 +34,34 @@ describe('hash + phone', () => {
     expect(data.em).toBeUndefined();
     expect(data.fn).toBeUndefined();
     expect(data.external_id).toBeDefined();
+  });
+
+  it('parte full_name con nombres compuestos y dos apellidos', () => {
+    expect(splitFullName('Juan Pérez')).toEqual({
+      firstName: 'Juan',
+      lastName: 'Pérez',
+    });
+    expect(splitFullName('Juan Diego Aguirre Armijos')).toEqual({
+      firstName: 'Juan Diego',
+      lastName: 'Aguirre Armijos',
+    });
+    expect(splitFullName('María José García López')).toEqual({
+      firstName: 'María José',
+      lastName: 'García López',
+    });
+    // Tres tokens: en LatAm suele ser nombre + dos apellidos
+    expect(splitFullName('Ana Pérez García')).toEqual({
+      firstName: 'Ana',
+      lastName: 'Pérez García',
+    });
+    const data = buildHashedUserData({
+      fullName: 'Juan Diego Aguirre Armijos',
+      phone: '0991234567',
+      country: 'EC',
+    });
+    expect(data.fn).toEqual([hashNamePart('Juan Diego')]);
+    expect(data.ln).toEqual([hashNamePart('Aguirre Armijos')]);
+    // No debe hashear el nombre completo concatenado como un solo fn
+    expect(data.fn?.[0]).not.toEqual(hashNamePart('Juan Diego Aguirre Armijos'));
   });
 });

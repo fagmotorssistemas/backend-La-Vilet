@@ -91,6 +91,32 @@ export function hashExternalId(raw: unknown): string | null {
   return sha256Hex(value);
 }
 
+/**
+ * Parte un nombre completo en fn/ln para Meta (LatAm).
+ * - 1 token → solo fn
+ * - 2 tokens → nombre + apellido
+ * - 3+ tokens → nombres de pila (todo menos los 2 últimos) + dos apellidos
+ *   (p. ej. "Juan Diego Aguirre Armijos" → fn="Juan Diego", ln="Aguirre Armijos").
+ * No asume "primera palabra = nombre / resto = apellido" en nombres compuestos.
+ */
+export function splitFullName(raw: unknown): {
+  firstName: string | null;
+  lastName: string | null;
+} {
+  const text = asTrimmedString(raw);
+  if (!text) return { firstName: null, lastName: null };
+  const parts = text.split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return { firstName: null, lastName: null };
+  if (parts.length === 1) return { firstName: parts[0], lastName: null };
+  if (parts.length === 2) {
+    return { firstName: parts[0], lastName: parts[1] };
+  }
+  return {
+    firstName: parts.slice(0, -2).join(' '),
+    lastName: parts.slice(-2).join(' '),
+  };
+}
+
 export function newEventId(): string {
   return randomUUID();
 }
@@ -112,10 +138,17 @@ export function buildHashedUserData(
   const out: Record<string, string[]> = {};
   const em = hashEmail(input.email);
   const ph = hashPhone(input.phone);
-  const fn =
-    hashNamePart(input.firstName) ||
-    (input.lastName ? null : hashNamePart(input.fullName));
-  const ln = hashNamePart(input.lastName);
+
+  let firstName = asTrimmedString(input.firstName);
+  let lastName = asTrimmedString(input.lastName);
+  if (!firstName && !lastName && input.fullName) {
+    const split = splitFullName(input.fullName);
+    firstName = split.firstName;
+    lastName = split.lastName;
+  }
+
+  const fn = hashNamePart(firstName);
+  const ln = hashNamePart(lastName);
   const ct = hashCity(input.city);
   const country = hashCountry(input.country);
   const externalId = hashExternalId(input.externalId);
