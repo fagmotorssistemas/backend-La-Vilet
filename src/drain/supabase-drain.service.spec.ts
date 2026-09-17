@@ -371,4 +371,55 @@ describe('SupabaseDrainService — review_hold vs pending', () => {
     expect(enqueueNames).toEqual(['Lead']);
     expect(schedulePending.status).toBe('pending');
   });
+
+  it('recover Schedule envía solo p_limit (sin sobrecarga / sin lookback en body)', async () => {
+    const rpcBodies: unknown[] = [];
+
+    global.fetch = jest.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method || 'GET').toUpperCase();
+      if (url.includes('/rpc/lv_recover_missing_meta_schedule_outbox')) {
+        rpcBodies.push(JSON.parse(String(init?.body || '{}')));
+        return jsonResponse(0);
+      }
+      if (url.includes('/rpc/')) return jsonResponse({});
+      if (url.includes('meta_ads_consent_ledger')) return jsonResponse([]);
+      if (url.includes('meta_capi_outbox') && method === 'GET') {
+        return jsonResponse([]);
+      }
+      return jsonResponse({}, 404);
+    }) as typeof fetch;
+
+    const service = new SupabaseDrainService(
+      {
+        get: (key: string) =>
+          ({
+            SUPABASE_URL: 'https://example.supabase.co',
+            SUPABASE_SERVICE_ROLE_KEY: 'service-role-test',
+            SUPABASE_DRAIN_BATCH_SIZE: '20',
+            SUPABASE_DRAIN_LOCK_TTL_MS: '60000',
+            META_SCHEDULE_RECOVER_ENABLED: 'true',
+          })[key],
+      } as unknown as ConfigService,
+      {
+        tryAcquireLock: () => true,
+        releaseLock: () => undefined,
+        isConsentRevoked: () => false,
+      } as unknown as DatabaseService,
+      {
+        enqueue: () => ({
+          ok: true,
+          blocked_by_consent: false,
+          outbox_status: 'pending',
+        }),
+      } as unknown as EventsService,
+      { mode: 'live' } as unknown as MetaCapiService,
+    );
+    (service as unknown as { enabled: boolean }).enabled = true;
+
+    await service.tick();
+
+    expect(rpcBodies).toEqual([{ p_limit: 50 }]);
+    expect(Object.keys(rpcBodies[0] as object).sort()).toEqual(['p_limit']);
+  });
 });

@@ -279,6 +279,8 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
     if (raw !== 'true' && raw !== '1') return;
 
     try {
+      // Firma única en PG: (p_limit, p_lookback_days DEFAULT 7). Solo p_limit
+      // evita ambigüedad PostgREST de sobrecargas homónimas.
       const res = await this.supabaseFetch(
         '/rest/v1/rpc/lv_recover_missing_meta_schedule_outbox',
         {
