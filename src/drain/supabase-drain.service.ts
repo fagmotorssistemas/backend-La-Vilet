@@ -128,8 +128,17 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
       let forwarded = 0;
       let cancelled = 0;
       let failed = 0;
+      let skipped = 0;
 
       for (const row of rows) {
+        // Defensa: solo pending. review_hold y terminales no se envían ni se mutan.
+        if (row.status !== 'pending') {
+          skipped += 1;
+          this.logger.log(
+            `drain skip non_pending status=${row.status} event_id=${row.event_id}`,
+          );
+          continue;
+        }
         const outcome = await this.forwardRow(row);
         if (outcome === 'forwarded') forwarded += 1;
         else if (outcome === 'cancelled') cancelled += 1;
@@ -138,9 +147,9 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
 
       this.lastTickAt = new Date().toISOString();
       this.lastTickError = null;
-      if (forwarded || cancelled || failed) {
+      if (forwarded || cancelled || failed || skipped) {
         this.logger.log(
-          `drain forwarded=${forwarded} cancelled=${cancelled} failed=${failed}`,
+          `drain forwarded=${forwarded} cancelled=${cancelled} failed=${failed} skipped=${skipped}`,
         );
       }
     } catch (error) {
@@ -317,7 +326,11 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
 
   private async forwardRow(
     row: SupabaseOutboxRow,
-  ): Promise<'forwarded' | 'cancelled' | 'failed'> {
+  ): Promise<'forwarded' | 'cancelled' | 'failed' | 'skipped'> {
+    if (row.status !== 'pending') {
+      return 'skipped';
+    }
+
     if (
       this.db.isConsentRevoked({
         visitorKey: row.visitor_key,
