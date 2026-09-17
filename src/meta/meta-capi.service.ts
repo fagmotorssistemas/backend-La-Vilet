@@ -32,6 +32,13 @@ export type BuildGraphInput = {
   contentCategory?: string | null;
   messagingChannel?: 'whatsapp';
   ctwaClid?: string | null;
+  /** user_data.whatsapp_business_account_id — distinto del dataset Graph. */
+  whatsappBusinessAccountId?: string | null;
+  /**
+   * Dataset messaging destino Graph. Si falta, sendToMeta usa dataset web/pixel
+   * (incorrecto para BM). El caller debe pasar el messaging dataset cuando exista.
+   */
+  messagingDatasetId?: string | null;
 };
 
 @Injectable()
@@ -182,6 +189,13 @@ export class MetaCapiService {
 
     if (input.actionSource === 'business_messaging') {
       event.messaging_channel = input.messagingChannel || 'whatsapp';
+      // Meta BM: ctwa_clid + WABA van en user_data (no custom_data).
+      if (input.ctwaClid) userData.ctwa_clid = String(input.ctwaClid).trim();
+      if (input.whatsappBusinessAccountId) {
+        userData.whatsapp_business_account_id = String(
+          input.whatsappBusinessAccountId,
+        ).trim();
+      }
     }
 
     const conservative = this.coreSetupConservative;
@@ -190,8 +204,8 @@ export class MetaCapiService {
       if (input.contentIds?.length) custom.content_ids = input.contentIds;
       if (input.contentName) custom.content_name = input.contentName;
       if (input.contentCategory) custom.content_category = input.contentCategory;
-      if (input.ctwaClid) custom.ctwa_clid = input.ctwaClid;
-      // Sin value/currency artificial; sin content_type inventado
+      // Sin value/currency artificial; sin content_type inventado.
+      // ctwa_clid NO va aquí (solo user_data en business_messaging).
       if (Object.keys(custom).length) event.custom_data = custom;
     }
 

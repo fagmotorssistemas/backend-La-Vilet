@@ -410,6 +410,18 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
           : undefined,
       delivery_lane: row.delivery_lane,
       ads_consent: true,
+      messaging_channel:
+        payload.messaging_channel === 'whatsapp' ? 'whatsapp' : undefined,
+      ctwa_clid:
+        typeof payload.ctwa_clid === 'string' ? payload.ctwa_clid : undefined,
+      whatsapp_business_account_id:
+        typeof payload.whatsapp_business_account_id === 'string'
+          ? payload.whatsapp_business_account_id
+          : undefined,
+      messaging_dataset_id:
+        typeof payload.messaging_dataset_id === 'string'
+          ? payload.messaging_dataset_id
+          : undefined,
     });
 
     if (result.blocked_by_consent || result.outbox_status === 'cancelled') {

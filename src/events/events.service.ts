@@ -70,10 +70,17 @@ export class EventsService {
       messagingChannel:
         dto.messaging_channel === 'whatsapp' ? 'whatsapp' : undefined,
       ctwaClid: dto.ctwa_clid,
+      whatsappBusinessAccountId: dto.whatsapp_business_account_id,
+      messagingDatasetId: dto.messaging_dataset_id,
     });
 
     const deliveryLane =
       dto.delivery_lane || (this.meta.mode === 'test' ? 'test' : 'live');
+
+    const datasetForRow =
+      dto.action_source === 'business_messaging' && dto.messaging_dataset_id
+        ? dto.messaging_dataset_id
+        : this.meta.datasetId;
 
     const result = this.db.insertOutbox({
       idempotency_key: dto.idempotency_key,
@@ -82,7 +89,7 @@ export class EventsService {
       event_time: built.eventTime,
       payload_redacted: built.redacted,
       graph_payload: built.payload,
-      dataset_id: this.meta.datasetId,
+      dataset_id: datasetForRow,
       delivery_lane: deliveryLane,
       visitor_key: visitorKey,
       lead_id: leadId,
