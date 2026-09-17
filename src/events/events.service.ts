@@ -19,6 +19,24 @@ export class EventsService {
       throw new BadRequestException('ads_consent requerido y debe ser true');
     }
 
+    if (dto.action_source === 'business_messaging') {
+      // Schedule WhatsApp bloqueado hasta verificar allowlist Meta.
+      if (dto.event_name === 'Schedule') {
+        throw new BadRequestException(
+          'business_messaging_schedule_unverified',
+        );
+      }
+      const dataset = String(dto.messaging_dataset_id || '').trim();
+      const ctwa = String(dto.ctwa_clid || '').trim();
+      const waba = String(dto.whatsapp_business_account_id || '').trim();
+      if (!dataset || !ctwa || !waba) {
+        throw new BadRequestException(
+          'business_messaging_identifiers_required',
+        );
+      }
+      // Nunca usar dataset web/pixel como fallback.
+    }
+
     const leadId = dto.lead_id || dto.external_id || null;
     const visitorKey = dto.visitor_key || null;
 
@@ -77,10 +95,12 @@ export class EventsService {
     const deliveryLane =
       dto.delivery_lane || (this.meta.mode === 'test' ? 'test' : 'live');
 
-    const datasetForRow =
-      dto.action_source === 'business_messaging' && dto.messaging_dataset_id
-        ? dto.messaging_dataset_id
-        : this.meta.datasetId;
+    let datasetForRow: string;
+    if (dto.action_source === 'business_messaging') {
+      datasetForRow = String(dto.messaging_dataset_id).trim();
+    } else {
+      datasetForRow = this.meta.datasetId;
+    }
 
     const result = this.db.insertOutbox({
       idempotency_key: dto.idempotency_key,
@@ -127,7 +147,7 @@ export class EventsService {
       delivery_lane: result.row.delivery_lane,
       mode: this.meta.mode,
       delivery,
-      dataset_id: this.meta.datasetId,
+      dataset_id: datasetForRow,
     };
   }
 }

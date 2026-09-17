@@ -121,6 +121,7 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
 
     try {
       await this.recoverMissingLeadOutbox();
+      await this.recoverMissingScheduleOutbox();
       await this.drainConsentLedger();
       const batch = Number(this.config.get('SUPABASE_DRAIN_BATCH_SIZE')) || 20;
       const lane = this.meta.mode === 'test' ? 'test' : 'live';
@@ -249,6 +250,34 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private async recoverMissingScheduleOutbox() {
+    const raw = String(
+      this.config.get<string>('META_SCHEDULE_RECOVER_ENABLED') || '',
+    )
+      .trim()
+      .toLowerCase();
+    if (raw !== 'true' && raw !== '1') return;
+
+    try {
+      const res = await this.supabaseFetch(
+        '/rest/v1/rpc/lv_recover_missing_meta_schedule_outbox',
+        {
+          method: 'POST',
+          body: JSON.stringify({ p_limit: 50 }),
+        },
+      );
+      if (!res.ok) {
+        this.logger.warn(
+          `recover_missing_meta_schedule_outbox http=${res.status}`,
+        );
+      }
+    } catch (error) {
+      this.logger.warn(
+        `recover_missing_meta_schedule_outbox ${error instanceof Error ? error.message : 'error'}`,
+      );
+    }
+  }
+
   private async recoverMissingLeadOutbox() {
     try {
       const res = await this.supabaseFetch(
@@ -358,18 +387,46 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
     }
 
     const payload = row.payload || {};
+    const actionSource =
+      (payload.action_source as
+        | 'website'
+        | 'system_generated'
+        | 'business_messaging'
+        | 'other'
+        | 'chat') || 'website';
+
+    if (actionSource === 'business_messaging') {
+      if (row.event_name === 'Schedule') {
+        this.logger.warn(
+          `drain skip bm_schedule_unverified event_id=${row.event_id}`,
+        );
+        return 'failed';
+      }
+      const ctwa =
+        typeof payload.ctwa_clid === 'string' ? payload.ctwa_clid.trim() : '';
+      const waba =
+        typeof payload.whatsapp_business_account_id === 'string'
+          ? payload.whatsapp_business_account_id.trim()
+          : '';
+      const dataset =
+        typeof payload.messaging_dataset_id === 'string'
+          ? payload.messaging_dataset_id.trim()
+          : '';
+      if (!ctwa || !waba || !dataset) {
+        this.logger.warn(
+          `drain skip bm_identifiers_missing event_id=${row.event_id}`,
+        );
+        // No encolar con dataset web.
+        return 'failed';
+      }
+    }
+
     const result = this.events.enqueue({
       event_name: row.event_name,
       idempotency_key: row.idempotency_key,
       event_id: row.event_id,
       event_time: row.event_time,
-      action_source:
-        (payload.action_source as
-          | 'website'
-          | 'system_generated'
-          | 'business_messaging'
-          | 'other'
-          | 'chat') || 'website',
+      action_source: actionSource,
       event_source_url:
         typeof payload.event_source_url === 'string'
           ? payload.event_source_url
