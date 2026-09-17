@@ -306,12 +306,22 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Promote acotado: solo review_hold Schedule website con last_error recovered_*.
-   * Revalida consent; nunca WhatsApp/BM ni histórico sin marca de recover.
+   * Promote acotado de review_hold recuperados → pending (solo si delivery ON).
+   *
+   * Límites:
+   * - Solo `event_name=Schedule`, `status=review_hold`, `last_error` recovered_*.
+   * - Solo `action_source=website` (nunca BM/WhatsApp).
+   * - Máx. `limit` (cap 50) por tick; no lote histórico genérico.
+   * - Revalida en vivo la cita: consent, confirmed_by_client, status,
+   *   canal web, confirmed_at dentro de lookback (default 7d, máx 30d).
+   * - Promote ≠ envío: el drain solo envía `pending` y vuelve a chequear consent
+   *   + META_SCHEDULE_DELIVERY_ENABLED + META_MODE antes de Graph.
    */
   private async promoteRecoveredWebScheduleHolds(limit: number) {
+    const lookbackDays = this.scheduleRecoverLookbackDays();
     const qs = new URLSearchParams({
-      select: 'id,lead_id,payload,last_error,status,event_name',
+      select:
+        'id,lead_id,payload,last_error,status,event_name,idempotency_key',
       status: 'eq.review_hold',
       event_name: 'eq.Schedule',
       last_error:
@@ -329,20 +339,203 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
       lead_id: string | null;
       payload: Record<string, unknown> | null;
       last_error: string | null;
+      idempotency_key: string;
     }>;
 
     for (const row of rows) {
-      const action = String(row.payload?.action_source || '').toLowerCase();
-      const channel = String(row.payload?.channel_kind || '').toLowerCase();
-      if (action !== 'website' || (channel && channel !== 'web')) {
-        continue;
-      }
-      if (row.lead_id && (await this.leadConsentFalse(row.lead_id))) {
-        await this.markSupabase(row.id, 'cancelled', 'ads_consent_revoked');
+      const gate = await this.evaluateRecoveredWebSchedulePromote(row, lookbackDays);
+      if (!gate.ok) {
+        if (gate.cancel) {
+          await this.markSupabase(row.id, 'cancelled', gate.reason);
+        } else {
+          this.logger.log(
+            `promote_recovered_skip reason=${gate.reason} id=${row.id}`,
+          );
+        }
         continue;
       }
       await this.markSupabase(row.id, 'pending', null);
     }
+  }
+
+  private scheduleRecoverLookbackDays(): number {
+    const raw = Number(
+      this.config.get<string>('META_SCHEDULE_RECOVER_LOOKBACK_DAYS') || 7,
+    );
+    if (!Number.isFinite(raw)) return 7;
+    return Math.max(1, Math.min(Math.floor(raw), 30));
+  }
+
+  /**
+   * Revalidación previa al promote (y por tanto previa a cualquier envío).
+   * Exportada vía tests del mismo módulo / spec con acceso al método privado.
+   */
+  private async evaluateRecoveredWebSchedulePromote(
+    row: {
+      id: string;
+      lead_id: string | null;
+      payload: Record<string, unknown> | null;
+      idempotency_key: string;
+    },
+    lookbackDays: number,
+  ): Promise<{ ok: true } | { ok: false; reason: string; cancel: boolean }> {
+    const action = String(row.payload?.action_source || '').toLowerCase();
+    if (action !== 'website') {
+      return {
+        ok: false,
+        reason: 'recovered_not_website',
+        cancel: false,
+      };
+    }
+
+    const appointmentId = this.scheduleAppointmentIdFromRow(row);
+    if (!appointmentId) {
+      return {
+        ok: false,
+        reason: 'recovered_missing_appointment_id',
+        cancel: false,
+      };
+    }
+
+    const appointment = await this.fetchAppointmentForSchedulePromote(appointmentId);
+    if (!appointment) {
+      return {
+        ok: false,
+        reason: 'recovered_appointment_not_found',
+        cancel: false,
+      };
+    }
+
+    if (appointment.confirmed_by_client !== true) {
+      return {
+        ok: false,
+        reason: 'recovered_client_confirmation_missing',
+        cancel: true,
+      };
+    }
+
+    const status = String(appointment.status || '')
+      .trim()
+      .toLowerCase();
+    if (status !== 'aceptado' && status !== 'reprogramado') {
+      return {
+        ok: false,
+        reason: 'recovered_not_confirmed_status',
+        cancel: true,
+      };
+    }
+
+    const channel = String(appointment.channel || '')
+      .trim()
+      .toLowerCase();
+    if (channel !== 'web' && channel !== 'website') {
+      return {
+        ok: false,
+        reason: 'recovered_channel_not_web',
+        cancel: true,
+      };
+    }
+
+    if (!appointment.confirmed_at) {
+      return {
+        ok: false,
+        reason: 'recovered_missing_confirmed_at',
+        cancel: true,
+      };
+    }
+    const confirmedMs = Date.parse(appointment.confirmed_at);
+    if (!Number.isFinite(confirmedMs)) {
+      return {
+        ok: false,
+        reason: 'recovered_invalid_confirmed_at',
+        cancel: true,
+      };
+    }
+    const ageMs = Date.now() - confirmedMs;
+    const maxAgeMs = lookbackDays * 24 * 60 * 60 * 1000;
+    if (ageMs < 0 || ageMs > maxAgeMs) {
+      return {
+        ok: false,
+        reason: 'recovered_outside_lookback',
+        cancel: false,
+      };
+    }
+
+    const leadId = appointment.lead_id || row.lead_id;
+    if (!leadId) {
+      return {
+        ok: false,
+        reason: 'recovered_missing_lead',
+        cancel: true,
+      };
+    }
+    if (await this.leadConsentFalse(leadId)) {
+      return {
+        ok: false,
+        reason: 'ads_consent_revoked',
+        cancel: true,
+      };
+    }
+    // Consent debe ser explícitamente true (no solo “no false”).
+    if (!(await this.leadConsentTrue(leadId))) {
+      return {
+        ok: false,
+        reason: 'ads_consent_missing',
+        cancel: true,
+      };
+    }
+
+    return { ok: true };
+  }
+
+  private scheduleAppointmentIdFromRow(row: {
+    payload: Record<string, unknown> | null;
+    idempotency_key: string;
+  }): string | null {
+    const fromPayload = String(row.payload?.appointment_id || '').trim();
+    if (/^[0-9a-f-]{36}$/i.test(fromPayload)) return fromPayload;
+    const key = String(row.idempotency_key || '');
+    const m = /^schedule:([0-9a-f-]{36})$/i.exec(key);
+    return m ? m[1] : null;
+  }
+
+  private async fetchAppointmentForSchedulePromote(appointmentId: string): Promise<{
+    id: string;
+    lead_id: string | null;
+    status: string | null;
+    channel: string | null;
+    confirmed_by_client: boolean | null;
+    confirmed_at: string | null;
+  } | null> {
+    const qs = new URLSearchParams({
+      select:
+        'id,lead_id,status,channel,confirmed_by_client,confirmed_at',
+      id: `eq.${appointmentId}`,
+      limit: '1',
+    });
+    const res = await this.supabaseFetch(`/rest/v1/appointments?${qs}`);
+    if (!res.ok) return null;
+    const rows = (await res.json()) as Array<{
+      id: string;
+      lead_id: string | null;
+      status: string | null;
+      channel: string | null;
+      confirmed_by_client: boolean | null;
+      confirmed_at: string | null;
+    }>;
+    return rows[0] || null;
+  }
+
+  private async leadConsentTrue(leadId: string): Promise<boolean> {
+    const qs = new URLSearchParams({
+      select: 'meta_ads_consent',
+      id: `eq.${leadId}`,
+      limit: '1',
+    });
+    const res = await this.supabaseFetch(`/rest/v1/leads?${qs}`);
+    if (!res.ok) return false;
+    const rows = (await res.json()) as Array<{ meta_ads_consent: boolean | null }>;
+    return rows[0]?.meta_ads_consent === true;
   }
 
   private async recoverMissingLeadOutbox() {
