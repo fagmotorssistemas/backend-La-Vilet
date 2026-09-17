@@ -469,8 +469,13 @@ export class SqliteOutboxStore {
     return { inserted: true, row };
   }
 
-  claimPending(limit: number, deliveryLane: DeliveryLane): OutboxRow[] {
+  claimPending(
+    limit: number,
+    deliveryLane: DeliveryLane,
+    opts?: { excludeSchedule?: boolean },
+  ): OutboxRow[] {
     const nowIso = new Date().toISOString();
+    const excludeSchedule = opts?.excludeSchedule === true;
     const tx = this.db.transaction(() => {
       const rows = this.db
         .prepare(
@@ -478,10 +483,16 @@ export class SqliteOutboxStore {
            WHERE status IN ('pending', 'failed')
              AND delivery_lane = @lane
              AND (next_attempt_at IS NULL OR next_attempt_at <= @now)
+             AND (@excludeSchedule = 0 OR event_name != 'Schedule')
            ORDER BY id ASC
            LIMIT @limit`,
         )
-        .all({ now: nowIso, limit, lane: deliveryLane }) as OutboxRow[];
+        .all({
+          now: nowIso,
+          limit,
+          lane: deliveryLane,
+          excludeSchedule: excludeSchedule ? 1 : 0,
+        }) as OutboxRow[];
 
       const claimed: OutboxRow[] = [];
       for (const row of rows) {
@@ -524,6 +535,25 @@ export class SqliteOutboxStore {
       return claimed;
     });
     return tx();
+  }
+
+  /**
+   * Devuelve processing → pending sin perder la fila (p. ej. Schedule con delivery OFF).
+   * Revierte el attempt_count del claim para no empujar a dead por el gate.
+   */
+  releaseProcessingToPending(id: number, reason: string): boolean {
+    const result = this.db
+      .prepare(
+        `UPDATE outbox_events
+         SET status = 'pending',
+             attempt_count = CASE WHEN attempt_count > 0 THEN attempt_count - 1 ELSE 0 END,
+             last_error = @reason,
+             next_attempt_at = NULL,
+             updated_at = datetime('now')
+         WHERE id = @id AND status = 'processing'`,
+      )
+      .run({ id, reason: reason.slice(0, 200) });
+    return result.changes === 1;
   }
 
   getOutboxById(id: number): OutboxRow | undefined {

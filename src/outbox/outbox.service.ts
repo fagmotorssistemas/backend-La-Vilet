@@ -70,7 +70,11 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
       const batch = Number(this.config.get('OUTBOX_BATCH_SIZE')) || 20;
       const maxAttempts = Number(this.config.get('OUTBOX_MAX_ATTEMPTS')) || 8;
       const lane = this.meta.mode === 'test' ? 'test' : 'live';
-      const claimed = this.db.claimPending(batch, lane);
+      const scheduleDeliveryOn = this.isScheduleDeliveryEnabled();
+      // Delivery OFF: no claim de Schedule → no se envían ni se pierden; Lead/VC siguen.
+      const claimed = this.db.claimPending(batch, lane, {
+        excludeSchedule: !scheduleDeliveryOn,
+      });
 
       for (const row of claimed) {
         // Revalidar estado + consentimiento inmediatamente antes de enviar.
@@ -86,6 +90,18 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
           })
         ) {
           this.db.cancelProcessingIfRevoked(row.id);
+          continue;
+        }
+
+        // Defensa: Schedule no sale a Graph si delivery se apagó tras el claim.
+        if (fresh.event_name === 'Schedule' && !scheduleDeliveryOn) {
+          this.db.releaseProcessingToPending(
+            row.id,
+            'schedule_delivery_inactive',
+          );
+          this.logger.log(
+            `outbox skip schedule_delivery_inactive id=${row.id} (conservado pending)`,
+          );
           continue;
         }
 
@@ -136,5 +152,14 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
     } finally {
       this.running = false;
     }
+  }
+
+  private isScheduleDeliveryEnabled() {
+    const raw = String(
+      this.config.get<string>('META_SCHEDULE_DELIVERY_ENABLED') || '',
+    )
+      .trim()
+      .toLowerCase();
+    return raw === 'true' || raw === '1';
   }
 }
