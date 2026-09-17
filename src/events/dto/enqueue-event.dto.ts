@@ -132,6 +132,17 @@ export class EnqueueEventDto {
   ctwa_clid?: string;
 
   @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  whatsapp_business_account_id?: string;
+
+  /** Dataset messaging Graph (≠ WABA). Si falta, no usar pixel web para BM. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  messaging_dataset_id?: string;
+
+  @IsOptional()
   @IsIn(['test', 'live'])
   delivery_lane?: 'test' | 'live';
 

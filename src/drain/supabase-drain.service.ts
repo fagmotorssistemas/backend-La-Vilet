@@ -121,6 +121,7 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
 
     try {
       await this.recoverMissingLeadOutbox();
+      await this.recoverMissingScheduleOutbox();
       await this.drainConsentLedger();
       const batch = Number(this.config.get('SUPABASE_DRAIN_BATCH_SIZE')) || 20;
       const lane = this.meta.mode === 'test' ? 'test' : 'live';
@@ -128,8 +129,28 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
       let forwarded = 0;
       let cancelled = 0;
       let failed = 0;
+      let skipped = 0;
 
       for (const row of rows) {
+        // Defensa: solo pending. review_hold y terminales no se envían ni se mutan.
+        if (row.status !== 'pending') {
+          skipped += 1;
+          this.logger.log(
+            `drain skip non_pending status=${row.status} event_id=${row.event_id}`,
+          );
+          continue;
+        }
+        // Schedule: delivery efectiva debe estar on (mismo control que FE).
+        if (
+          row.event_name === 'Schedule' &&
+          !this.isScheduleDeliveryEnabled()
+        ) {
+          skipped += 1;
+          this.logger.log(
+            `drain skip schedule_delivery_inactive event_id=${row.event_id}`,
+          );
+          continue;
+        }
         const outcome = await this.forwardRow(row);
         if (outcome === 'forwarded') forwarded += 1;
         else if (outcome === 'cancelled') cancelled += 1;
@@ -138,9 +159,9 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
 
       this.lastTickAt = new Date().toISOString();
       this.lastTickError = null;
-      if (forwarded || cancelled || failed) {
+      if (forwarded || cancelled || failed || skipped) {
         this.logger.log(
-          `drain forwarded=${forwarded} cancelled=${cancelled} failed=${failed}`,
+          `drain forwarded=${forwarded} cancelled=${cancelled} failed=${failed} skipped=${skipped}`,
         );
       }
     } catch (error) {
@@ -240,6 +261,354 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private isScheduleDeliveryEnabled() {
+    const raw = String(
+      this.config.get<string>('META_SCHEDULE_DELIVERY_ENABLED') || '',
+    )
+      .trim()
+      .toLowerCase();
+    return raw === 'true' || raw === '1';
+  }
+
+  private async recoverMissingScheduleOutbox() {
+    const raw = String(
+      this.config.get<string>('META_SCHEDULE_RECOVER_ENABLED') || '',
+    )
+      .trim()
+      .toLowerCase();
+    if (raw !== 'true' && raw !== '1') return;
+
+    try {
+      // Firma única en PG: (p_limit, p_lookback_days DEFAULT 7). Solo p_limit
+      // evita ambigüedad PostgREST de sobrecargas homónimas.
+      const res = await this.supabaseFetch(
+        '/rest/v1/rpc/lv_recover_missing_meta_schedule_outbox',
+        {
+          method: 'POST',
+          body: JSON.stringify({ p_limit: 50 }),
+        },
+      );
+      if (!res.ok) {
+        this.logger.warn(
+          `recover_missing_meta_schedule_outbox http=${res.status}`,
+        );
+        return;
+      }
+      // Con delivery ON: promover holds web recuperados (no lote histórico genérico).
+      if (this.isScheduleDeliveryEnabled()) {
+        await this.promoteRecoveredWebScheduleHolds(50);
+      }
+    } catch (error) {
+      this.logger.warn(
+        `recover_missing_meta_schedule_outbox ${error instanceof Error ? error.message : 'error'}`,
+      );
+    }
+  }
+
+  /**
+   * Promote acotado de review_hold recuperados → pending (solo si delivery ON).
+   *
+   * Límites:
+   * - Solo `event_name=Schedule`, `status=review_hold`, `last_error` recovered_*.
+   * - Solo `action_source=website` (nunca BM/WhatsApp).
+   * - Paginación por cursor (created_at, id): omisiones no bloquean filas posteriores.
+   * - Cap promote por tick + maxScan para no barrer infinito.
+   * - Transición atómica `review_hold` → `pending` (PATCH con filtro status).
+   * - Revalida cita: consent, confirmed_by_client, status, canal web, lookback.
+   */
+  private async promoteRecoveredWebScheduleHolds(limit: number) {
+    const lookbackDays = this.scheduleRecoverLookbackDays();
+    const pageSize = Math.max(1, Math.min(limit, 50));
+    const maxPromote = pageSize;
+    const maxScan = Math.max(pageSize * 4, 200);
+    let promoted = 0;
+    let scanned = 0;
+    let cursorId: string | null = null;
+
+    while (scanned < maxScan && promoted < maxPromote) {
+      const batch = await this.fetchRecoveredScheduleHoldsPage({
+        pageSize,
+        cursorId,
+      });
+      if (batch.length === 0) break;
+
+      for (const row of batch) {
+        scanned += 1;
+        cursorId = row.id;
+
+        const gate = await this.evaluateRecoveredWebSchedulePromote(
+          row,
+          lookbackDays,
+        );
+        if (!gate.ok) {
+          if (gate.cancel) {
+            const cancelled = await this.transitionSupabaseStatus(
+              row.id,
+              'review_hold',
+              'cancelled',
+              gate.reason,
+            );
+            if (!cancelled) {
+              this.logger.log(
+                `promote_cancel_race id=${row.id} reason=${gate.reason}`,
+              );
+            }
+          } else {
+            this.logger.log(
+              `promote_recovered_skip reason=${gate.reason} id=${row.id}`,
+            );
+          }
+          continue;
+        }
+
+        const ok = await this.transitionSupabaseStatus(
+          row.id,
+          'review_hold',
+          'pending',
+          null,
+        );
+        if (ok) {
+          promoted += 1;
+        } else {
+          this.logger.log(
+            `promote_race_lost id=${row.id} (ya no review_hold)`,
+          );
+        }
+        if (promoted >= maxPromote) break;
+      }
+
+      if (batch.length < pageSize) break;
+    }
+
+    if (scanned > 0) {
+      this.logger.log(
+        `promote_recovered scanned=${scanned} promoted=${promoted}`,
+      );
+    }
+  }
+
+  private async fetchRecoveredScheduleHoldsPage(opts: {
+    pageSize: number;
+    cursorId: string | null;
+  }): Promise<
+    Array<{
+      id: string;
+      lead_id: string | null;
+      payload: Record<string, unknown> | null;
+      last_error: string | null;
+      idempotency_key: string;
+      created_at: string | null;
+    }>
+  > {
+    const qs = new URLSearchParams({
+      select:
+        'id,lead_id,payload,last_error,status,event_name,idempotency_key,created_at',
+      status: 'eq.review_hold',
+      event_name: 'eq.Schedule',
+      last_error:
+        'in.(recovered_pre_intent_gap,recovered_missing_schedule_outbox)',
+      // Cursor por id: omisiones no reaparecen en el mismo barrido.
+      order: 'id.asc',
+      limit: String(opts.pageSize),
+    });
+    if (opts.cursorId) {
+      qs.set('id', `gt.${opts.cursorId}`);
+    }
+    const res = await this.supabaseFetch(`/rest/v1/meta_capi_outbox?${qs}`);
+    if (!res.ok) {
+      this.logger.warn(`promote_recovered_schedule_fetch http=${res.status}`);
+      return [];
+    }
+    return (await res.json()) as Array<{
+      id: string;
+      lead_id: string | null;
+      payload: Record<string, unknown> | null;
+      last_error: string | null;
+      idempotency_key: string;
+      created_at: string | null;
+    }>;
+  }
+
+  private scheduleRecoverLookbackDays(): number {
+    const raw = Number(
+      this.config.get<string>('META_SCHEDULE_RECOVER_LOOKBACK_DAYS') || 7,
+    );
+    if (!Number.isFinite(raw)) return 7;
+    return Math.max(1, Math.min(Math.floor(raw), 30));
+  }
+
+  /**
+   * Revalidación previa al promote (y por tanto previa a cualquier envío).
+   * Exportada vía tests del mismo módulo / spec con acceso al método privado.
+   */
+  private async evaluateRecoveredWebSchedulePromote(
+    row: {
+      id: string;
+      lead_id: string | null;
+      payload: Record<string, unknown> | null;
+      idempotency_key: string;
+    },
+    lookbackDays: number,
+  ): Promise<{ ok: true } | { ok: false; reason: string; cancel: boolean }> {
+    const action = String(row.payload?.action_source || '').toLowerCase();
+    if (action !== 'website') {
+      return {
+        ok: false,
+        reason: 'recovered_not_website',
+        cancel: false,
+      };
+    }
+
+    const appointmentId = this.scheduleAppointmentIdFromRow(row);
+    if (!appointmentId) {
+      return {
+        ok: false,
+        reason: 'recovered_missing_appointment_id',
+        cancel: false,
+      };
+    }
+
+    const appointment = await this.fetchAppointmentForSchedulePromote(appointmentId);
+    if (!appointment) {
+      return {
+        ok: false,
+        reason: 'recovered_appointment_not_found',
+        cancel: false,
+      };
+    }
+
+    if (appointment.confirmed_by_client !== true) {
+      return {
+        ok: false,
+        reason: 'recovered_client_confirmation_missing',
+        cancel: true,
+      };
+    }
+
+    const status = String(appointment.status || '')
+      .trim()
+      .toLowerCase();
+    if (status !== 'aceptado' && status !== 'reprogramado') {
+      return {
+        ok: false,
+        reason: 'recovered_not_confirmed_status',
+        cancel: true,
+      };
+    }
+
+    const channel = String(appointment.channel || '')
+      .trim()
+      .toLowerCase();
+    if (channel !== 'web' && channel !== 'website') {
+      return {
+        ok: false,
+        reason: 'recovered_channel_not_web',
+        cancel: true,
+      };
+    }
+
+    if (!appointment.confirmed_at) {
+      return {
+        ok: false,
+        reason: 'recovered_missing_confirmed_at',
+        cancel: true,
+      };
+    }
+    const confirmedMs = Date.parse(appointment.confirmed_at);
+    if (!Number.isFinite(confirmedMs)) {
+      return {
+        ok: false,
+        reason: 'recovered_invalid_confirmed_at',
+        cancel: true,
+      };
+    }
+    const ageMs = Date.now() - confirmedMs;
+    const maxAgeMs = lookbackDays * 24 * 60 * 60 * 1000;
+    if (ageMs < 0 || ageMs > maxAgeMs) {
+      return {
+        ok: false,
+        reason: 'recovered_outside_lookback',
+        cancel: false,
+      };
+    }
+
+    const leadId = appointment.lead_id || row.lead_id;
+    if (!leadId) {
+      return {
+        ok: false,
+        reason: 'recovered_missing_lead',
+        cancel: true,
+      };
+    }
+    if (await this.leadConsentFalse(leadId)) {
+      return {
+        ok: false,
+        reason: 'ads_consent_revoked',
+        cancel: true,
+      };
+    }
+    // Consent debe ser explícitamente true (no solo “no false”).
+    if (!(await this.leadConsentTrue(leadId))) {
+      return {
+        ok: false,
+        reason: 'ads_consent_missing',
+        cancel: true,
+      };
+    }
+
+    return { ok: true };
+  }
+
+  private scheduleAppointmentIdFromRow(row: {
+    payload: Record<string, unknown> | null;
+    idempotency_key: string;
+  }): string | null {
+    const fromPayload = String(row.payload?.appointment_id || '').trim();
+    if (/^[0-9a-f-]{36}$/i.test(fromPayload)) return fromPayload;
+    const key = String(row.idempotency_key || '');
+    const m = /^schedule:([0-9a-f-]{36})$/i.exec(key);
+    return m ? m[1] : null;
+  }
+
+  private async fetchAppointmentForSchedulePromote(appointmentId: string): Promise<{
+    id: string;
+    lead_id: string | null;
+    status: string | null;
+    channel: string | null;
+    confirmed_by_client: boolean | null;
+    confirmed_at: string | null;
+  } | null> {
+    const qs = new URLSearchParams({
+      select:
+        'id,lead_id,status,channel,confirmed_by_client,confirmed_at',
+      id: `eq.${appointmentId}`,
+      limit: '1',
+    });
+    const res = await this.supabaseFetch(`/rest/v1/appointments?${qs}`);
+    if (!res.ok) return null;
+    const rows = (await res.json()) as Array<{
+      id: string;
+      lead_id: string | null;
+      status: string | null;
+      channel: string | null;
+      confirmed_by_client: boolean | null;
+      confirmed_at: string | null;
+    }>;
+    return rows[0] || null;
+  }
+
+  private async leadConsentTrue(leadId: string): Promise<boolean> {
+    const qs = new URLSearchParams({
+      select: 'meta_ads_consent',
+      id: `eq.${leadId}`,
+      limit: '1',
+    });
+    const res = await this.supabaseFetch(`/rest/v1/leads?${qs}`);
+    if (!res.ok) return false;
+    const rows = (await res.json()) as Array<{ meta_ads_consent: boolean | null }>;
+    return rows[0]?.meta_ads_consent === true;
+  }
+
   private async recoverMissingLeadOutbox() {
     try {
       const res = await this.supabaseFetch(
@@ -317,7 +686,11 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
 
   private async forwardRow(
     row: SupabaseOutboxRow,
-  ): Promise<'forwarded' | 'cancelled' | 'failed'> {
+  ): Promise<'forwarded' | 'cancelled' | 'failed' | 'skipped'> {
+    if (row.status !== 'pending') {
+      return 'skipped';
+    }
+
     if (
       this.db.isConsentRevoked({
         visitorKey: row.visitor_key,
@@ -345,18 +718,51 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
     }
 
     const payload = row.payload || {};
+    const actionSource =
+      (payload.action_source as
+        | 'website'
+        | 'system_generated'
+        | 'business_messaging'
+        | 'other'
+        | 'chat') || 'website';
+
+    if (actionSource === 'business_messaging') {
+      if (row.event_name === 'Schedule') {
+        this.logger.warn(
+          `drain cancel bm_schedule_not_supported_by_meta event_id=${row.event_id}`,
+        );
+        await this.markSupabase(
+          row.id,
+          'cancelled',
+          'business_messaging_schedule_not_supported_by_meta',
+        );
+        return 'cancelled';
+      }
+      const ctwa =
+        typeof payload.ctwa_clid === 'string' ? payload.ctwa_clid.trim() : '';
+      const waba =
+        typeof payload.whatsapp_business_account_id === 'string'
+          ? payload.whatsapp_business_account_id.trim()
+          : '';
+      const dataset =
+        typeof payload.messaging_dataset_id === 'string'
+          ? payload.messaging_dataset_id.trim()
+          : '';
+      if (!ctwa || !waba || !dataset) {
+        this.logger.warn(
+          `drain skip bm_identifiers_missing event_id=${row.event_id}`,
+        );
+        // No encolar con dataset web.
+        return 'failed';
+      }
+    }
+
     const result = this.events.enqueue({
       event_name: row.event_name,
       idempotency_key: row.idempotency_key,
       event_id: row.event_id,
       event_time: row.event_time,
-      action_source:
-        (payload.action_source as
-          | 'website'
-          | 'system_generated'
-          | 'business_messaging'
-          | 'other'
-          | 'chat') || 'website',
+      action_source: actionSource,
       event_source_url:
         typeof payload.event_source_url === 'string'
           ? payload.event_source_url
@@ -397,6 +803,18 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
           : undefined,
       delivery_lane: row.delivery_lane,
       ads_consent: true,
+      messaging_channel:
+        payload.messaging_channel === 'whatsapp' ? 'whatsapp' : undefined,
+      ctwa_clid:
+        typeof payload.ctwa_clid === 'string' ? payload.ctwa_clid : undefined,
+      whatsapp_business_account_id:
+        typeof payload.whatsapp_business_account_id === 'string'
+          ? payload.whatsapp_business_account_id
+          : undefined,
+      messaging_dataset_id:
+        typeof payload.messaging_dataset_id === 'string'
+          ? payload.messaging_dataset_id
+          : undefined,
     });
 
     if (result.blocked_by_consent || result.outbox_status === 'cancelled') {
@@ -418,23 +836,41 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
     status: 'forwarded' | 'cancelled' | 'pending',
     lastError: string | null,
   ) {
+    const ok = await this.transitionSupabaseStatus(id, null, status, lastError);
+    if (!ok) {
+      throw new Error(`mark_supabase_no_row id=${id} status=${status}`);
+    }
+  }
+
+  /**
+   * Transición condicionada. Si `fromStatus` se indica, solo actualiza filas en ese estado
+   * (p. ej. review_hold→pending). Devuelve true solo si hubo fila representada.
+   */
+  private async transitionSupabaseStatus(
+    id: string,
+    fromStatus: string | null,
+    toStatus: 'forwarded' | 'cancelled' | 'pending',
+    lastError: string | null,
+  ): Promise<boolean> {
     const body: Record<string, unknown> = {
-      status,
+      status: toStatus,
       updated_at: new Date().toISOString(),
       last_error: lastError,
     };
-    if (status === 'forwarded') {
+    if (toStatus === 'forwarded') {
       body.forwarded_at = new Date().toISOString();
     }
-    const res = await this.supabaseFetch(
-      `/rest/v1/meta_capi_outbox?id=eq.${id}`,
-      {
-        method: 'PATCH',
-        body: JSON.stringify(body),
-      },
-    );
+    const filter = fromStatus
+      ? `id=eq.${id}&status=eq.${fromStatus}`
+      : `id=eq.${id}`;
+    const res = await this.supabaseFetch(`/rest/v1/meta_capi_outbox?${filter}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    });
     if (!res.ok) {
       throw new Error(`mark_supabase_http_${res.status}`);
     }
+    const rows = (await res.json().catch(() => [])) as unknown[];
+    return Array.isArray(rows) && rows.length > 0;
   }
 }

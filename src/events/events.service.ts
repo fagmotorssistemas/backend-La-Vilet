@@ -19,6 +19,25 @@ export class EventsService {
       throw new BadRequestException('ads_consent requerido y debe ser true');
     }
 
+    if (dto.action_source === 'business_messaging') {
+      // Schedule WhatsApp: Meta BM no admite event_name Schedule (docs CAPI BM;
+      // Graph 2804066). No renombrar ni remapear a website.
+      if (dto.event_name === 'Schedule') {
+        throw new BadRequestException(
+          'business_messaging_schedule_not_supported_by_meta',
+        );
+      }
+      const dataset = String(dto.messaging_dataset_id || '').trim();
+      const ctwa = String(dto.ctwa_clid || '').trim();
+      const waba = String(dto.whatsapp_business_account_id || '').trim();
+      if (!dataset || !ctwa || !waba) {
+        throw new BadRequestException(
+          'business_messaging_identifiers_required',
+        );
+      }
+      // Nunca usar dataset web/pixel como fallback.
+    }
+
     const leadId = dto.lead_id || dto.external_id || null;
     const visitorKey = dto.visitor_key || null;
 
@@ -70,10 +89,19 @@ export class EventsService {
       messagingChannel:
         dto.messaging_channel === 'whatsapp' ? 'whatsapp' : undefined,
       ctwaClid: dto.ctwa_clid,
+      whatsappBusinessAccountId: dto.whatsapp_business_account_id,
+      messagingDatasetId: dto.messaging_dataset_id,
     });
 
     const deliveryLane =
       dto.delivery_lane || (this.meta.mode === 'test' ? 'test' : 'live');
+
+    let datasetForRow: string;
+    if (dto.action_source === 'business_messaging') {
+      datasetForRow = String(dto.messaging_dataset_id).trim();
+    } else {
+      datasetForRow = this.meta.datasetId;
+    }
 
     const result = this.db.insertOutbox({
       idempotency_key: dto.idempotency_key,
@@ -82,7 +110,7 @@ export class EventsService {
       event_time: built.eventTime,
       payload_redacted: built.redacted,
       graph_payload: built.payload,
-      dataset_id: this.meta.datasetId,
+      dataset_id: datasetForRow,
       delivery_lane: deliveryLane,
       visitor_key: visitorKey,
       lead_id: leadId,
@@ -120,7 +148,7 @@ export class EventsService {
       delivery_lane: result.row.delivery_lane,
       mode: this.meta.mode,
       delivery,
-      dataset_id: this.meta.datasetId,
+      dataset_id: datasetForRow,
     };
   }
 }
