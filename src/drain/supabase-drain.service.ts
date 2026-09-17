@@ -140,6 +140,17 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
           );
           continue;
         }
+        // Schedule: delivery efectiva debe estar on (mismo control que FE).
+        if (
+          row.event_name === 'Schedule' &&
+          !this.isScheduleDeliveryEnabled()
+        ) {
+          skipped += 1;
+          this.logger.log(
+            `drain skip schedule_delivery_inactive event_id=${row.event_id}`,
+          );
+          continue;
+        }
         const outcome = await this.forwardRow(row);
         if (outcome === 'forwarded') forwarded += 1;
         else if (outcome === 'cancelled') cancelled += 1;
@@ -248,6 +259,15 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
     if (!res.ok) {
       this.logger.warn(`mark_consent_ledger http=${res.status}`);
     }
+  }
+
+  private isScheduleDeliveryEnabled() {
+    const raw = String(
+      this.config.get<string>('META_SCHEDULE_DELIVERY_ENABLED') || '',
+    )
+      .trim()
+      .toLowerCase();
+    return raw === 'true' || raw === '1';
   }
 
   private async recoverMissingScheduleOutbox() {

@@ -288,4 +288,87 @@ describe('SupabaseDrainService — review_hold vs pending', () => {
     expect(patchedIds).toEqual(['injected-pending']);
     expect(pending.status).toBe('forwarded');
   });
+
+  it('Schedule pending no se drena si META_SCHEDULE_DELIVERY_ENABLED off', async () => {
+    const schedulePending: OutboxRow = {
+      id: 'sch-pending',
+      idempotency_key: 'schedule:x',
+      event_id: '55555555-5555-4555-8555-555555555555',
+      event_name: 'Schedule',
+      event_time: 1,
+      payload: { action_source: 'website', phone: '5939' },
+      status: 'pending',
+      delivery_lane: 'live',
+      lead_id: null,
+      visitor_key: null,
+      ads_consent_required: false,
+    };
+    const leadPending: OutboxRow = {
+      id: 'lead-pending',
+      idempotency_key: 'lead:y',
+      event_id: '66666666-6666-4666-8666-666666666666',
+      event_name: 'Lead',
+      event_time: 1,
+      payload: { action_source: 'website', phone: '5939' },
+      status: 'pending',
+      delivery_lane: 'live',
+      lead_id: null,
+      visitor_key: null,
+      ads_consent_required: false,
+    };
+    const enqueueNames: string[] = [];
+
+    global.fetch = jest.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method || 'GET').toUpperCase();
+      if (url.includes('/rpc/')) return jsonResponse({});
+      if (url.includes('meta_ads_consent_ledger')) return jsonResponse([]);
+      if (url.includes('meta_capi_outbox') && method === 'GET') {
+        return jsonResponse([schedulePending, leadPending]);
+      }
+      if (url.includes('meta_capi_outbox') && method === 'PATCH') {
+        const idMatch = url.match(/id=eq\.([^&]+)/);
+        const id = idMatch ? decodeURIComponent(idMatch[1]) : '';
+        const body = JSON.parse(String(init?.body || '{}')) as { status?: string };
+        if (id === leadPending.id && body.status) leadPending.status = body.status;
+        if (id === schedulePending.id && body.status) {
+          schedulePending.status = body.status;
+        }
+        return jsonResponse([{ id }]);
+      }
+      return jsonResponse({}, 404);
+    }) as typeof fetch;
+
+    const service = new SupabaseDrainService(
+      {
+        get: (key: string) =>
+          ({
+            SUPABASE_URL: 'https://example.supabase.co',
+            SUPABASE_SERVICE_ROLE_KEY: 'service-role-test',
+            SUPABASE_DRAIN_BATCH_SIZE: '20',
+            SUPABASE_DRAIN_LOCK_TTL_MS: '60000',
+            // delivery off
+            META_SCHEDULE_DELIVERY_ENABLED: 'false',
+          })[key],
+      } as unknown as ConfigService,
+      {
+        tryAcquireLock: () => true,
+        releaseLock: () => undefined,
+        isConsentRevoked: () => false,
+      } as unknown as DatabaseService,
+      {
+        enqueue: (dto: { event_name: string }) => {
+          enqueueNames.push(dto.event_name);
+          return { ok: true, blocked_by_consent: false, outbox_status: 'pending' };
+        },
+      } as unknown as EventsService,
+      { mode: 'live' } as unknown as MetaCapiService,
+    );
+    (service as unknown as { enabled: boolean }).enabled = true;
+
+    await service.tick();
+
+    expect(enqueueNames).toEqual(['Lead']);
+    expect(schedulePending.status).toBe('pending');
+  });
 });
