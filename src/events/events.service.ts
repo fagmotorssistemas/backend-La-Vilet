@@ -20,10 +20,11 @@ export class EventsService {
     }
 
     if (dto.action_source === 'business_messaging') {
-      // Schedule WhatsApp bloqueado hasta verificar allowlist Meta.
+      // Schedule WhatsApp: Meta BM no admite event_name Schedule (docs CAPI BM;
+      // Graph 2804066). No renombrar ni remapear a website.
       if (dto.event_name === 'Schedule') {
         throw new BadRequestException(
-          'business_messaging_schedule_unverified',
+          'business_messaging_schedule_not_supported_by_meta',
         );
       }
       const dataset = String(dto.messaging_dataset_id || '').trim();

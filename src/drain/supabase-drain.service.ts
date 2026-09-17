@@ -292,11 +292,56 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
         this.logger.warn(
           `recover_missing_meta_schedule_outbox http=${res.status}`,
         );
+        return;
+      }
+      // Con delivery ON: promover holds web recuperados (no lote histórico genérico).
+      if (this.isScheduleDeliveryEnabled()) {
+        await this.promoteRecoveredWebScheduleHolds(50);
       }
     } catch (error) {
       this.logger.warn(
         `recover_missing_meta_schedule_outbox ${error instanceof Error ? error.message : 'error'}`,
       );
+    }
+  }
+
+  /**
+   * Promote acotado: solo review_hold Schedule website con last_error recovered_*.
+   * Revalida consent; nunca WhatsApp/BM ni histórico sin marca de recover.
+   */
+  private async promoteRecoveredWebScheduleHolds(limit: number) {
+    const qs = new URLSearchParams({
+      select: 'id,lead_id,payload,last_error,status,event_name',
+      status: 'eq.review_hold',
+      event_name: 'eq.Schedule',
+      last_error:
+        'in.(recovered_pre_intent_gap,recovered_missing_schedule_outbox)',
+      order: 'created_at.asc',
+      limit: String(Math.max(1, Math.min(limit, 50))),
+    });
+    const res = await this.supabaseFetch(`/rest/v1/meta_capi_outbox?${qs}`);
+    if (!res.ok) {
+      this.logger.warn(`promote_recovered_schedule_fetch http=${res.status}`);
+      return;
+    }
+    const rows = (await res.json()) as Array<{
+      id: string;
+      lead_id: string | null;
+      payload: Record<string, unknown> | null;
+      last_error: string | null;
+    }>;
+
+    for (const row of rows) {
+      const action = String(row.payload?.action_source || '').toLowerCase();
+      const channel = String(row.payload?.channel_kind || '').toLowerCase();
+      if (action !== 'website' || (channel && channel !== 'web')) {
+        continue;
+      }
+      if (row.lead_id && (await this.leadConsentFalse(row.lead_id))) {
+        await this.markSupabase(row.id, 'cancelled', 'ads_consent_revoked');
+        continue;
+      }
+      await this.markSupabase(row.id, 'pending', null);
     }
   }
 
@@ -420,9 +465,14 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
     if (actionSource === 'business_messaging') {
       if (row.event_name === 'Schedule') {
         this.logger.warn(
-          `drain skip bm_schedule_unverified event_id=${row.event_id}`,
+          `drain cancel bm_schedule_not_supported_by_meta event_id=${row.event_id}`,
         );
-        return 'failed';
+        await this.markSupabase(
+          row.id,
+          'cancelled',
+          'business_messaging_schedule_not_supported_by_meta',
+        );
+        return 'cancelled';
       }
       const ctwa =
         typeof payload.ctwa_clid === 'string' ? payload.ctwa_clid.trim() : '';

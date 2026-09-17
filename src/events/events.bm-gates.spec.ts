@@ -72,7 +72,7 @@ describe('EventsService — Business Messaging gates', () => {
       } as EnqueueEventDto);
     } catch (e) {
       expect((e as BadRequestException).message).toContain(
-        'business_messaging_schedule_unverified',
+        'business_messaging_schedule_not_supported_by_meta',
       );
     }
   });
