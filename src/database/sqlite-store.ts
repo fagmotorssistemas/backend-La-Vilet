@@ -472,10 +472,11 @@ export class SqliteOutboxStore {
   claimPending(
     limit: number,
     deliveryLane: DeliveryLane,
-    opts?: { excludeSchedule?: boolean },
+    opts?: { excludeSchedule?: boolean; excludeLeadSubmitted?: boolean },
   ): OutboxRow[] {
     const nowIso = new Date().toISOString();
     const excludeSchedule = opts?.excludeSchedule === true;
+    const excludeLeadSubmitted = opts?.excludeLeadSubmitted === true;
     const tx = this.db.transaction(() => {
       const rows = this.db
         .prepare(
@@ -484,6 +485,7 @@ export class SqliteOutboxStore {
              AND delivery_lane = @lane
              AND (next_attempt_at IS NULL OR next_attempt_at <= @now)
              AND (@excludeSchedule = 0 OR event_name != 'Schedule')
+             AND (@excludeLeadSubmitted = 0 OR event_name != 'LeadSubmitted')
            ORDER BY id ASC
            LIMIT @limit`,
         )
@@ -492,6 +494,7 @@ export class SqliteOutboxStore {
           limit,
           lane: deliveryLane,
           excludeSchedule: excludeSchedule ? 1 : 0,
+          excludeLeadSubmitted: excludeLeadSubmitted ? 1 : 0,
         }) as OutboxRow[];
 
       const claimed: OutboxRow[] = [];

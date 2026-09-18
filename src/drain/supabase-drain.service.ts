@@ -14,7 +14,7 @@ type SupabaseOutboxRow = {
   id: string;
   idempotency_key: string;
   event_id: string;
-  event_name: 'ViewContent' | 'Lead' | 'Schedule';
+  event_name: 'ViewContent' | 'Lead' | 'Schedule' | 'LeadSubmitted';
   event_time: number;
   payload: Record<string, unknown>;
   status: string;
@@ -151,6 +151,17 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
           );
           continue;
         }
+        // LeadSubmitted BM: mismo flag de entrega WA (default off).
+        if (
+          row.event_name === 'LeadSubmitted' &&
+          !this.isWaLeadSubmittedDeliveryEnabled()
+        ) {
+          skipped += 1;
+          this.logger.log(
+            `drain skip wa_lead_submitted_delivery_inactive event_id=${row.event_id}`,
+          );
+          continue;
+        }
         const outcome = await this.forwardRow(row);
         if (outcome === 'forwarded') forwarded += 1;
         else if (outcome === 'cancelled') cancelled += 1;
@@ -264,6 +275,15 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
   private isScheduleDeliveryEnabled() {
     const raw = String(
       this.config.get<string>('META_SCHEDULE_DELIVERY_ENABLED') || '',
+    )
+      .trim()
+      .toLowerCase();
+    return raw === 'true' || raw === '1';
+  }
+
+  private isWaLeadSubmittedDeliveryEnabled() {
+    const raw = String(
+      this.config.get<string>('META_WA_LEAD_SUBMITTED_DELIVERY_ENABLED') || '',
     )
       .trim()
       .toLowerCase();
@@ -824,6 +844,18 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
 
     if (result.ok) {
       await this.markSupabase(row.id, 'forwarded', null);
+      if (row.event_name === 'LeadSubmitted') {
+        await this.logConversionBestEffort({
+          stage: 'backend_accepted',
+          eventName: row.event_name,
+          reason: 'forwarded_to_nest',
+          leadId: row.lead_id,
+          eventId: row.event_id,
+          idempotencyKey: row.idempotency_key,
+          deliveryLane: row.delivery_lane,
+          details: { nest_event_id: result.event_id },
+        });
+      }
       return 'forwarded';
     }
 
@@ -839,6 +871,35 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
     const ok = await this.transitionSupabaseStatus(id, null, status, lastError);
     if (!ok) {
       throw new Error(`mark_supabase_no_row id=${id} status=${status}`);
+    }
+  }
+
+  private async logConversionBestEffort(input: {
+    stage: string;
+    eventName: string;
+    reason: string | null;
+    leadId: string | null;
+    eventId: string;
+    idempotencyKey: string;
+    deliveryLane: string;
+    details: Record<string, unknown>;
+  }) {
+    try {
+      await this.supabaseFetch('/rest/v1/rpc/lv_log_meta_conversion', {
+        method: 'POST',
+        body: JSON.stringify({
+          p_stage: input.stage,
+          p_event_name: input.eventName,
+          p_reason: input.reason,
+          p_lead_id: input.leadId,
+          p_event_id: input.eventId,
+          p_idempotency_key: input.idempotencyKey,
+          p_delivery_lane: input.deliveryLane,
+          p_details: input.details,
+        }),
+      });
+    } catch {
+      // soft-fail
     }
   }
 

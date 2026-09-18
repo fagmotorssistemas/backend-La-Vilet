@@ -92,21 +92,65 @@ describe('EventsService — Business Messaging gates', () => {
     expect(db.insertOutbox).not.toHaveBeenCalled();
   });
 
-  it('BM válido usa messaging_dataset_id, no dataset web', () => {
+  it('LeadSubmitted BM válido usa messaging dataset (no pixel web)', () => {
     const { service, db } = makeService();
     const result = service.enqueue({
       ...base,
-      event_name: 'Lead',
+      event_name: 'LeadSubmitted',
       action_source: 'business_messaging',
       messaging_channel: 'whatsapp',
-      ctwa_clid: 'Aff',
+      ctwa_clid: 'Aff-LS',
       whatsapp_business_account_id: 'waba',
-      messaging_dataset_id: 'MSG_DATASET_ONLY',
+      messaging_dataset_id: 'MSG_DATASET_LS',
     } as EnqueueEventDto);
-    expect(result.dataset_id).toBe('MSG_DATASET_ONLY');
+    expect(result.dataset_id).toBe('MSG_DATASET_LS');
     expect(result.dataset_id).not.toBe('WEB_PIXEL_DATASET');
-    expect(db.insertOutbox).toHaveBeenCalledWith(
-      expect.objectContaining({ dataset_id: 'MSG_DATASET_ONLY' }),
-    );
+  });
+
+  it('LeadSubmitted BM sin ctwa_clid se rechaza', () => {
+    const { service, db } = makeService();
+    expect(() =>
+      service.enqueue({
+        ...base,
+        event_name: 'LeadSubmitted',
+        action_source: 'business_messaging',
+        messaging_channel: 'whatsapp',
+        whatsapp_business_account_id: 'waba',
+        messaging_dataset_id: 'msg-ds',
+      } as EnqueueEventDto),
+    ).toThrow(/business_messaging_identifiers_required/);
+    expect(db.insertOutbox).not.toHaveBeenCalled();
+  });
+
+  it('rechaza WABA igual al messaging dataset', () => {
+    const { service, db } = makeService();
+    expect(() =>
+      service.enqueue({
+        ...base,
+        event_name: 'LeadSubmitted',
+        action_source: 'business_messaging',
+        messaging_channel: 'whatsapp',
+        ctwa_clid: 'Aff',
+        whatsapp_business_account_id: 'SAME_ID',
+        messaging_dataset_id: 'SAME_ID',
+      } as EnqueueEventDto),
+    ).toThrow(/business_messaging_waba_must_not_equal_dataset/);
+    expect(db.insertOutbox).not.toHaveBeenCalled();
+  });
+
+  it('rechaza messaging dataset igual al pixel web', () => {
+    const { service, db } = makeService();
+    expect(() =>
+      service.enqueue({
+        ...base,
+        event_name: 'LeadSubmitted',
+        action_source: 'business_messaging',
+        messaging_channel: 'whatsapp',
+        ctwa_clid: 'Aff',
+        whatsapp_business_account_id: 'waba',
+        messaging_dataset_id: 'WEB_PIXEL_DATASET',
+      } as EnqueueEventDto),
+    ).toThrow(/business_messaging_dataset_must_not_be_web_pixel/);
+    expect(db.insertOutbox).not.toHaveBeenCalled();
   });
 });

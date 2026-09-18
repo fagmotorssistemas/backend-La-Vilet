@@ -35,7 +35,17 @@ export class EventsService {
           'business_messaging_identifiers_required',
         );
       }
-      // Nunca usar dataset web/pixel como fallback.
+      // Nunca usar dataset web/pixel como fallback; WABA ≠ dataset Graph.
+      if (dataset === waba) {
+        throw new BadRequestException(
+          'business_messaging_waba_must_not_equal_dataset',
+        );
+      }
+      if (dataset === this.meta.datasetId) {
+        throw new BadRequestException(
+          'business_messaging_dataset_must_not_be_web_pixel',
+        );
+      }
     }
 
     const leadId = dto.lead_id || dto.external_id || null;

@@ -71,9 +71,11 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
       const maxAttempts = Number(this.config.get('OUTBOX_MAX_ATTEMPTS')) || 8;
       const lane = this.meta.mode === 'test' ? 'test' : 'live';
       const scheduleDeliveryOn = this.isScheduleDeliveryEnabled();
-      // Delivery OFF: no claim de Schedule → no se envían ni se pierden; Lead/VC siguen.
+      const waLeadSubmittedDeliveryOn = this.isWaLeadSubmittedDeliveryEnabled();
+      // Delivery OFF: no claim de Schedule / LeadSubmitted → no se envían ni se pierden; Lead/VC siguen.
       const claimed = this.db.claimPending(batch, lane, {
         excludeSchedule: !scheduleDeliveryOn,
+        excludeLeadSubmitted: !waLeadSubmittedDeliveryOn,
       });
 
       for (const row of claimed) {
@@ -105,6 +107,18 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
           continue;
         }
 
+        // Defensa: LeadSubmitted BM — apagado efectivo también para ya encolados.
+        if (fresh.event_name === 'LeadSubmitted' && !waLeadSubmittedDeliveryOn) {
+          this.db.releaseProcessingToPending(
+            row.id,
+            'wa_lead_submitted_delivery_inactive',
+          );
+          this.logger.log(
+            `outbox skip wa_lead_submitted_delivery_inactive id=${row.id} (conservado pending)`,
+          );
+          continue;
+        }
+
         let payload = JSON.parse(fresh.graph_payload) as Record<
           string,
           unknown
@@ -122,7 +136,36 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
         // Tras await: no sobrescribir si se canceló concurrentemente.
         if (result.ok) {
           this.db.markSent(row.id, result.bodyRedacted);
+          await this.logMetaAccepted({
+            eventName: fresh.event_name,
+            eventId: fresh.event_id,
+            leadId: fresh.lead_id,
+            idempotencyKey: fresh.idempotency_key,
+            deliveryLane: fresh.delivery_lane,
+            datasetId: fresh.dataset_id,
+            fbtraceId: result.fbtraceId,
+            eventsReceived: result.eventsReceived,
+            httpStatus: result.httpStatus,
+          });
           continue;
+        }
+
+        if (fresh.event_name === 'LeadSubmitted') {
+          await this.logMetaConversion({
+            stage: 'meta_rejected',
+            eventName: fresh.event_name,
+            reason: result.errorMessage || 'meta_error',
+            eventId: fresh.event_id,
+            leadId: fresh.lead_id,
+            idempotencyKey: fresh.idempotency_key,
+            deliveryLane: fresh.delivery_lane,
+            details: {
+              fbtrace_id: result.fbtraceId,
+              events_received: result.eventsReceived,
+              http_status: result.httpStatus,
+              dataset_id: fresh.dataset_id,
+            },
+          });
         }
 
         const attempts = fresh.attempt_count;
@@ -161,5 +204,93 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
       .trim()
       .toLowerCase();
     return raw === 'true' || raw === '1';
+  }
+
+  private isWaLeadSubmittedDeliveryEnabled() {
+    const raw = String(
+      this.config.get<string>('META_WA_LEAD_SUBMITTED_DELIVERY_ENABLED') || '',
+    )
+      .trim()
+      .toLowerCase();
+    return raw === 'true' || raw === '1';
+  }
+
+  private supabaseUrl() {
+    return String(this.config.get<string>('SUPABASE_URL') || '')
+      .trim()
+      .replace(/\/$/, '');
+  }
+
+  private serviceRoleKey() {
+    return String(
+      this.config.get<string>('SUPABASE_SERVICE_ROLE_KEY') || '',
+    ).trim();
+  }
+
+  private async logMetaAccepted(input: {
+    eventName: string;
+    eventId: string;
+    leadId: string | null;
+    idempotencyKey: string;
+    deliveryLane: string;
+    datasetId: string;
+    fbtraceId: string | null;
+    eventsReceived: number | null;
+    httpStatus: number;
+  }) {
+    await this.logMetaConversion({
+      stage: 'meta_accepted',
+      eventName: input.eventName,
+      reason: null,
+      eventId: input.eventId,
+      leadId: input.leadId,
+      idempotencyKey: input.idempotencyKey,
+      deliveryLane: input.deliveryLane,
+      details: {
+        fbtrace_id: input.fbtraceId,
+        events_received: input.eventsReceived,
+        http_status: input.httpStatus,
+        dataset_id: input.datasetId,
+        correlated: Boolean(input.eventId && input.fbtraceId),
+      },
+    });
+  }
+
+  /** Best-effort bitácora Supabase; no bloquea el worker. */
+  private async logMetaConversion(input: {
+    stage: string;
+    eventName: string;
+    reason: string | null;
+    eventId: string;
+    leadId: string | null;
+    idempotencyKey: string;
+    deliveryLane: string;
+    details: Record<string, unknown>;
+  }) {
+    const url = this.supabaseUrl();
+    const key = this.serviceRoleKey();
+    if (!url || !key) return;
+    try {
+      await fetch(`${url}/rest/v1/rpc/lv_log_meta_conversion`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          apikey: key,
+          Authorization: `Bearer ${key}`,
+        },
+        body: JSON.stringify({
+          p_stage: input.stage,
+          p_event_name: input.eventName,
+          p_reason: input.reason,
+          p_lead_id: input.leadId,
+          p_event_id: input.eventId,
+          p_idempotency_key: input.idempotencyKey,
+          p_delivery_lane: input.deliveryLane,
+          p_details: input.details,
+        }),
+      });
+    } catch {
+      // soft-fail
+    }
   }
 }

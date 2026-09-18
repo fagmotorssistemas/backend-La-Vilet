@@ -14,8 +14,8 @@ import {
 import { Transform } from 'class-transformer';
 
 export class EnqueueEventDto {
-  @IsIn(['ViewContent', 'Lead', 'Schedule'])
-  event_name!: 'ViewContent' | 'Lead' | 'Schedule';
+  @IsIn(['ViewContent', 'Lead', 'Schedule', 'LeadSubmitted'])
+  event_name!: 'ViewContent' | 'Lead' | 'Schedule' | 'LeadSubmitted';
 
   @IsString()
   @MaxLength(200)

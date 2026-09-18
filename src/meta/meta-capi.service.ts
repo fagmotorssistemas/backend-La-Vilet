@@ -13,7 +13,7 @@ import {
 } from './core-setup-conservative';
 
 export type MetaMode = 'disabled' | 'test' | 'live';
-export type MetaEventName = 'ViewContent' | 'Lead' | 'Schedule';
+export type MetaEventName = 'ViewContent' | 'Lead' | 'Schedule' | 'LeadSubmitted';
 
 export type BuildGraphInput = {
   eventName: MetaEventName;
@@ -35,8 +35,8 @@ export type BuildGraphInput = {
   /** user_data.whatsapp_business_account_id — distinto del dataset Graph. */
   whatsappBusinessAccountId?: string | null;
   /**
-   * Dataset messaging destino Graph. Si falta, sendToMeta usa dataset web/pixel
-   * (incorrecto para BM). El caller debe pasar el messaging dataset cuando exista.
+   * Dataset messaging destino Graph. Obligatorio para BM.
+   * Nunca sustituir por pixel/web dataset ni por el WABA.
    */
   messagingDatasetId?: string | null;
 };

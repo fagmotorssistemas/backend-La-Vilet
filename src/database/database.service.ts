@@ -73,7 +73,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   claimPending(
     limit: number,
     deliveryLane: DeliveryLane,
-    opts?: { excludeSchedule?: boolean },
+    opts?: { excludeSchedule?: boolean; excludeLeadSubmitted?: boolean },
   ): OutboxRow[] {
     return this.store.claimPending(limit, deliveryLane, opts);
   }
