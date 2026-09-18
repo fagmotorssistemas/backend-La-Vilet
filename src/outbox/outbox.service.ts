@@ -11,6 +11,7 @@ import {
   countGraphPayloadEvents,
   evaluateMetaAcceptanceEvidence,
 } from '../meta/meta-acceptance';
+import { decideWaLeadSubmittedConsentGate } from '../meta/wa-lead-submitted-consent-gate';
 
 @Injectable()
 export class OutboxService implements OnModuleInit, OnModuleDestroy {
@@ -98,8 +99,25 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
           continue;
         }
 
-        // Revocación tras encolar: revalidar lead en Supabase antes de Graph.
-        if (fresh.ads_consent_required && fresh.lead_id) {
+        // LeadSubmitted: consentimiento exactamente true (fuente leads) + scope.
+        // Otros eventos: solo cancelan si consent === false (comportamiento previo).
+        if (fresh.event_name === 'LeadSubmitted') {
+          const gate = await this.resolveLeadSubmittedConsentGate(fresh);
+          if (gate.action === 'cancel_revoked') {
+            this.db.cancelProcessingIfRevoked(row.id);
+            this.logger.log(
+              `outbox cancel ${gate.reason} id=${row.id} event=LeadSubmitted`,
+            );
+            continue;
+          }
+          if (gate.action === 'hold_pending') {
+            this.db.releaseProcessingToPending(row.id, gate.reason);
+            this.logger.log(
+              `outbox hold ${gate.reason} id=${row.id} (conservado pending)`,
+            );
+            continue;
+          }
+        } else if (fresh.ads_consent_required && fresh.lead_id) {
           const leadConsentFalse = await this.supabaseLeadAdsConsentFalse(
             fresh.lead_id,
           );
@@ -279,7 +297,7 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
     ).trim();
   }
 
-  /** true = consent false en leads; null = no consultable. */
+  /** true = consent false en leads; null = no consultable. Solo Lead/VC/Schedule. */
   private async supabaseLeadAdsConsentFalse(
     leadId: string,
   ): Promise<boolean | null> {
@@ -306,6 +324,112 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
       return rows[0].meta_ads_consent === false;
     } catch {
       return null;
+    }
+  }
+
+  private async resolveLeadSubmittedConsentGate(row: {
+    lead_id: string | null;
+    graph_payload: string;
+    payload_redacted?: string;
+  }) {
+    let redacted: Record<string, unknown> = {};
+    try {
+      redacted = JSON.parse(row.payload_redacted || '{}') as Record<
+        string,
+        unknown
+      >;
+    } catch {
+      redacted = {};
+    }
+
+    const eventTenantId =
+      typeof redacted.tenant_id === 'string' ? redacted.tenant_id : null;
+    const eventProjectId =
+      typeof redacted.project_id === 'string' ? redacted.project_id : null;
+    const eventContactId =
+      typeof redacted.contact_id === 'string' ? redacted.contact_id : null;
+
+    if (!row.lead_id) {
+      return decideWaLeadSubmittedConsentGate({
+        queryOk: true,
+        leadFound: false,
+        metaAdsConsent: null,
+        eventTenantId,
+        eventProjectId,
+        eventContactId,
+      });
+    }
+
+    const url = this.supabaseUrl();
+    const key = this.serviceRoleKey();
+    if (!url || !key) {
+      return decideWaLeadSubmittedConsentGate({
+        queryOk: false,
+        leadFound: false,
+        metaAdsConsent: null,
+        eventTenantId,
+        eventProjectId,
+        eventContactId,
+      });
+    }
+
+    try {
+      const qs = new URLSearchParams({
+        select: 'meta_ads_consent,tenant_id,project_id',
+        id: `eq.${row.lead_id}`,
+        limit: '1',
+      });
+      const res = await fetch(`${url}/rest/v1/leads?${qs}`, {
+        headers: {
+          apikey: key,
+          Authorization: `Bearer ${key}`,
+        },
+      });
+      if (!res.ok) {
+        return decideWaLeadSubmittedConsentGate({
+          queryOk: false,
+          leadFound: false,
+          metaAdsConsent: null,
+          eventTenantId,
+          eventProjectId,
+          eventContactId,
+        });
+      }
+      const rows = (await res.json()) as Array<{
+        meta_ads_consent: boolean | null;
+        tenant_id: string | null;
+        project_id: string | null;
+      }>;
+      if (!rows.length) {
+        return decideWaLeadSubmittedConsentGate({
+          queryOk: true,
+          leadFound: false,
+          metaAdsConsent: null,
+          eventTenantId,
+          eventProjectId,
+          eventContactId,
+        });
+      }
+      const lead = rows[0];
+      return decideWaLeadSubmittedConsentGate({
+        queryOk: true,
+        leadFound: true,
+        metaAdsConsent: lead.meta_ads_consent,
+        leadTenantId: lead.tenant_id,
+        leadProjectId: lead.project_id,
+        eventTenantId,
+        eventProjectId,
+        eventContactId,
+      });
+    } catch {
+      return decideWaLeadSubmittedConsentGate({
+        queryOk: false,
+        leadFound: false,
+        metaAdsConsent: null,
+        eventTenantId,
+        eventProjectId,
+        eventContactId,
+      });
     }
   }
 

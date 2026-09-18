@@ -155,6 +155,20 @@ export class EnqueueEventDto {
   @IsUUID('4')
   lead_id?: string;
 
+  /** Alcance CRM (LeadSubmitted); no van a Graph. */
+  @IsOptional()
+  @IsUUID('4')
+  tenant_id?: string;
+
+  @IsOptional()
+  @IsUUID('4')
+  project_id?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  contact_id?: string;
+
   @Transform(({ value }) => value === true || value === 'true' || value === 1)
   @IsBoolean()
   ads_consent!: boolean;

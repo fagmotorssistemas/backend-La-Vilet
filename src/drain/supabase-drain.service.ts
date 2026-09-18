@@ -9,6 +9,7 @@ import { randomUUID } from 'crypto';
 import { DatabaseService } from '../database/database.service';
 import { EventsService } from '../events/events.service';
 import { MetaCapiService } from '../meta/meta-capi.service';
+import { decideWaLeadSubmittedConsentGate } from '../meta/wa-lead-submitted-consent-gate';
 
 type SupabaseOutboxRow = {
   id: string;
@@ -678,6 +679,84 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
     return rows[0]?.meta_ads_consent === false;
   }
 
+  /** Solo LeadSubmitted: true estricto + scope; error → hold. */
+  private async leadSubmittedConsentGate(
+    row: SupabaseOutboxRow,
+    payload: Record<string, unknown>,
+  ) {
+    const eventTenantId =
+      typeof payload.tenant_id === 'string' ? payload.tenant_id : null;
+    const eventProjectId =
+      typeof payload.project_id === 'string' ? payload.project_id : null;
+    const eventContactId =
+      typeof payload.contact_id === 'string' ? payload.contact_id : null;
+
+    if (!row.lead_id) {
+      return decideWaLeadSubmittedConsentGate({
+        queryOk: true,
+        leadFound: false,
+        metaAdsConsent: null,
+        eventTenantId,
+        eventProjectId,
+        eventContactId,
+      });
+    }
+
+    try {
+      const qs = new URLSearchParams({
+        select: 'meta_ads_consent,tenant_id,project_id',
+        id: `eq.${row.lead_id}`,
+        limit: '1',
+      });
+      const res = await this.supabaseFetch(`/rest/v1/leads?${qs}`);
+      if (!res.ok) {
+        return decideWaLeadSubmittedConsentGate({
+          queryOk: false,
+          leadFound: false,
+          metaAdsConsent: null,
+          eventTenantId,
+          eventProjectId,
+          eventContactId,
+        });
+      }
+      const rows = (await res.json()) as Array<{
+        meta_ads_consent: boolean | null;
+        tenant_id: string | null;
+        project_id: string | null;
+      }>;
+      if (!rows.length) {
+        return decideWaLeadSubmittedConsentGate({
+          queryOk: true,
+          leadFound: false,
+          metaAdsConsent: null,
+          eventTenantId,
+          eventProjectId,
+          eventContactId,
+        });
+      }
+      const lead = rows[0];
+      return decideWaLeadSubmittedConsentGate({
+        queryOk: true,
+        leadFound: true,
+        metaAdsConsent: lead.meta_ads_consent,
+        leadTenantId: lead.tenant_id,
+        leadProjectId: lead.project_id,
+        eventTenantId,
+        eventProjectId,
+        eventContactId,
+      });
+    } catch {
+      return decideWaLeadSubmittedConsentGate({
+        queryOk: false,
+        leadFound: false,
+        metaAdsConsent: null,
+        eventTenantId,
+        eventProjectId,
+        eventContactId,
+      });
+    }
+  }
+
   /** Versión persistida en ledger Supabase; nunca inventa Date.now(). */
   private async fetchLatestLedgerVersion(opts: {
     leadId?: string | null;
@@ -738,6 +817,22 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
     }
 
     const payload = row.payload || {};
+
+    // LeadSubmitted: exige consent exactamente true + scope; error → skip (pending).
+    if (row.event_name === 'LeadSubmitted') {
+      const gate = await this.leadSubmittedConsentGate(row, payload);
+      if (gate.action === 'cancel_revoked') {
+        await this.markSupabase(row.id, 'cancelled', gate.reason);
+        return 'cancelled';
+      }
+      if (gate.action === 'hold_pending') {
+        this.logger.log(
+          `drain hold ${gate.reason} event_id=${row.event_id} (conservado pending)`,
+        );
+        return 'skipped';
+      }
+    }
+
     const actionSource =
       (payload.action_source as
         | 'website'
@@ -835,6 +930,12 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
         typeof payload.messaging_dataset_id === 'string'
           ? payload.messaging_dataset_id
           : undefined,
+      tenant_id:
+        typeof payload.tenant_id === 'string' ? payload.tenant_id : undefined,
+      project_id:
+        typeof payload.project_id === 'string' ? payload.project_id : undefined,
+      contact_id:
+        typeof payload.contact_id === 'string' ? payload.contact_id : undefined,
     });
 
     if (result.blocked_by_consent || result.outbox_status === 'cancelled') {
