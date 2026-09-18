@@ -164,7 +164,9 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
         }
 
         const expectedEvents = countGraphPayloadEvents(payload);
-        const result = await this.meta.sendToMeta(fresh.dataset_id, payload);
+        const result = await this.meta.sendToMeta(fresh.dataset_id, payload, {
+          eventName: fresh.event_name,
+        });
 
         const evidence = evaluateMetaAcceptanceEvidence({
           httpOk: result.httpStatus >= 200 && result.httpStatus < 300,

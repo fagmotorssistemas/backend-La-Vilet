@@ -67,9 +67,20 @@ export class MetaCapiService {
     return this.config.get<string>('META_API_VERSION')?.trim() || 'v21.0';
   }
 
+  /** Token CAPI web (pixel/dataset website). Nunca usar para BM WhatsApp. */
   get accessToken(): string {
     return String(
       this.config.get<string>('META_CAPI_ACCESS_TOKEN') || '',
+    ).trim();
+  }
+
+  /**
+   * Token CAPI business messaging (LeadSubmitted / WhatsApp).
+   * Separado del web; scopes WA (`whatsapp_business_manage_events`, etc.).
+   */
+  get waMessagingAccessToken(): string {
+    return String(
+      this.config.get<string>('META_WA_CAPI_ACCESS_TOKEN') || '',
     ).trim();
   }
 
@@ -245,9 +256,40 @@ export class MetaCapiService {
     return { eventId, eventTime, payload, redacted };
   }
 
+  /**
+   * Credencial Graph según destino.
+   * BM / LeadSubmitted → META_WA_CAPI_ACCESS_TOKEN (nunca el token web).
+   */
+  resolveGraphCredentialLane(
+    payload: Record<string, unknown>,
+    eventName?: string | null,
+  ): 'web' | 'whatsapp_messaging' {
+    if (String(eventName || '').trim() === 'LeadSubmitted') {
+      return 'whatsapp_messaging';
+    }
+    const data = payload?.data;
+    if (Array.isArray(data) && data.length > 0) {
+      const first = data[0] as Record<string, unknown>;
+      if (first?.action_source === 'business_messaging') {
+        return 'whatsapp_messaging';
+      }
+      if (first?.event_name === 'LeadSubmitted') {
+        return 'whatsapp_messaging';
+      }
+    }
+    return 'web';
+  }
+
+  tokenForCredentialLane(lane: 'web' | 'whatsapp_messaging'): string {
+    return lane === 'whatsapp_messaging'
+      ? this.waMessagingAccessToken
+      : this.accessToken;
+  }
+
   async sendToMeta(
     datasetId: string,
     payload: Record<string, unknown>,
+    options?: { eventName?: string | null },
   ): Promise<{
     ok: boolean;
     httpStatus: number;
@@ -257,6 +299,29 @@ export class MetaCapiService {
     errorMessage: string | null;
     bodyRedacted: Record<string, unknown>;
   }> {
+    const credentialLane = this.resolveGraphCredentialLane(
+      payload,
+      options?.eventName,
+    );
+    const bearer = this.tokenForCredentialLane(credentialLane);
+    if (!bearer) {
+      return {
+        ok: false,
+        httpStatus: 0,
+        eventsReceived: null,
+        fbtraceId: null,
+        retryable: false,
+        errorMessage:
+          credentialLane === 'whatsapp_messaging'
+            ? 'Falta META_WA_CAPI_ACCESS_TOKEN'
+            : 'Falta META_CAPI_ACCESS_TOKEN',
+        bodyRedacted: {
+          credential_lane: credentialLane,
+          token_missing: true,
+        },
+      };
+    }
+
     const timeout = Number(this.config.get('META_HTTP_TIMEOUT_MS')) || 10000;
     const url = `https://graph.facebook.com/${this.apiVersion}/${datasetId}/events`;
     const controller = new AbortController();
@@ -267,7 +332,7 @@ export class MetaCapiService {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.accessToken}`,
+          Authorization: `Bearer ${bearer}`,
         },
         body: JSON.stringify(payload),
         signal: controller.signal,

@@ -26,6 +26,9 @@ export class HealthController {
       api_version: this.meta.apiVersion,
       test_code_present: Boolean(this.meta.testEventCode),
       token_configured: Boolean(this.meta.accessToken),
+      wa_messaging_token_configured: Boolean(
+        this.meta.waMessagingAccessToken,
+      ),
       delivery_enabled: gate.ok,
       delivery_reason: gate.ok ? null : gate.reason,
       core_setup_conservative: this.meta.coreSetupConservative,

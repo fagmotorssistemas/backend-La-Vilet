@@ -1,0 +1,24 @@
+{
+  "event_id": "20273482-4e2b-429b-8597-d2681cf16307",
+  "event_time": 1789765115,
+  "idempotency_key": "wa_bm_test:20273482-4e2b-429b-8597-d2681cf16307",
+  "event_name": "TestEvent",
+  "test_event_code": "TEST9686",
+  "dataset_id": "4419657838288963",
+  "waba_id": "1410020224338488",
+  "api_version": "v26.0",
+  "custom_data": {
+    "currency": "USD",
+    "value": 100
+  },
+  "ctwa_clid_configured": true,
+  "ctwa_clid_mask": {
+    "len": 112,
+    "sha12": "2bca2da5fb6c"
+  },
+  "transport": "independent_graph_post",
+  "frozen_for_single_send": true,
+  "event_time_refreshed_on_send": true,
+  "rejected_event_id_not_reused": "e3851838-e153-4df3-a835-d49b7394130d",
+  "updated_at": "2026-09-18T20:58:35.998Z"
+}

@@ -1,0 +1,50 @@
+{
+  "updated_at": "2026-09-18T20:58:35.998Z",
+  "comparison": {
+    "source": "captura_graph_explorer_exitosa_usuario",
+    "api_version": {
+      "graph_explorer_success": "v26.0",
+      "probe_failed": "v21.0",
+      "probe_prepared_now": "v26.0",
+      "nest_META_API_VERSION_untouched": "v21.0"
+    },
+    "custom_data": {
+      "graph_explorer_success": {
+        "currency": "USD",
+        "value": 100
+      },
+      "probe_failed": {
+        "currency": "USD",
+        "value": 123
+      },
+      "probe_prepared_now": {
+        "currency": "USD",
+        "value": 100
+      },
+      "value_type": "number"
+    },
+    "ctwa_clid": {
+      "graph_explorer_success_captured_in_repo": false,
+      "note": "No hay archivo/local con el ctwa_clid del envío exitoso. Pegar en META_WA_BM_TEST_CTWA_CLID (.env.meta-wa-readonly.local). No se presupone el sample de docs Meta.",
+      "prepared_from_env": true,
+      "prepared_mask": {
+        "len": 112,
+        "sha12": "2bca2da5fb6c"
+      }
+    },
+    "partner_agent": {
+      "probe_failed": "present",
+      "prepared": "absent"
+    },
+    "preserved": [
+      "TestEvent",
+      "business_messaging",
+      "whatsapp",
+      "1410020224338488",
+      "4419657838288963",
+      "TEST9686"
+    ]
+  },
+  "prior_error_recovery": "Cuerpo completo del 400 no recuperable sin reenvío; sonda antigua truncó subcode/user_msg/fbtrace.",
+  "rejected_row": "e3851838-e153-4df3-a835-d49b7394130d"
+}
