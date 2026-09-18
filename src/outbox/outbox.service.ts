@@ -7,6 +7,10 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { DatabaseService } from '../database/database.service';
 import { MetaCapiService } from '../meta/meta-capi.service';
+import {
+  countGraphPayloadEvents,
+  evaluateMetaAcceptanceEvidence,
+} from '../meta/meta-acceptance';
 
 @Injectable()
 export class OutboxService implements OnModuleInit, OnModuleDestroy {
@@ -72,14 +76,13 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
       const lane = this.meta.mode === 'test' ? 'test' : 'live';
       const scheduleDeliveryOn = this.isScheduleDeliveryEnabled();
       const waLeadSubmittedDeliveryOn = this.isWaLeadSubmittedDeliveryEnabled();
-      // Delivery OFF: no claim de Schedule / LeadSubmitted → no se envían ni se pierden; Lead/VC siguen.
+      // Delivery OFF: no claim Schedule / LeadSubmitted → no se envían ni se pierden; Lead/VC siguen.
       const claimed = this.db.claimPending(batch, lane, {
         excludeSchedule: !scheduleDeliveryOn,
         excludeLeadSubmitted: !waLeadSubmittedDeliveryOn,
       });
 
       for (const row of claimed) {
-        // Revalidar estado + consentimiento inmediatamente antes de enviar.
         const fresh = this.db.getOutboxById(row.id);
         if (!fresh || fresh.status !== 'processing') {
           continue;
@@ -95,7 +98,20 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
           continue;
         }
 
-        // Defensa: Schedule no sale a Graph si delivery se apagó tras el claim.
+        // Revocación tras encolar: revalidar lead en Supabase antes de Graph.
+        if (fresh.ads_consent_required && fresh.lead_id) {
+          const leadConsentFalse = await this.supabaseLeadAdsConsentFalse(
+            fresh.lead_id,
+          );
+          if (leadConsentFalse === true) {
+            this.db.cancelProcessingIfRevoked(row.id);
+            this.logger.log(
+              `outbox cancel ads_consent_revoked_pre_graph id=${row.id}`,
+            );
+            continue;
+          }
+        }
+
         if (fresh.event_name === 'Schedule' && !scheduleDeliveryOn) {
           this.db.releaseProcessingToPending(
             row.id,
@@ -107,7 +123,6 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
           continue;
         }
 
-        // Defensa: LeadSubmitted BM — apagado efectivo también para ya encolados.
         if (fresh.event_name === 'LeadSubmitted' && !waLeadSubmittedDeliveryOn) {
           this.db.releaseProcessingToPending(
             row.id,
@@ -123,7 +138,6 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
           string,
           unknown
         >;
-        // Core Setup: revalidar siempre antes de Graph (incluye cola antigua).
         payload = this.meta.applyCoreSetupBeforeGraphSend(payload);
         if (this.meta.mode === 'test' && this.meta.testEventCode) {
           payload.test_event_code = this.meta.testEventCode;
@@ -131,10 +145,20 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
           delete payload.test_event_code;
         }
 
+        const expectedEvents = countGraphPayloadEvents(payload);
         const result = await this.meta.sendToMeta(fresh.dataset_id, payload);
 
-        // Tras await: no sobrescribir si se canceló concurrentemente.
-        if (result.ok) {
+        const evidence = evaluateMetaAcceptanceEvidence({
+          httpOk: result.httpStatus >= 200 && result.httpStatus < 300,
+          httpStatus: result.httpStatus,
+          error: result.ok ? undefined : result.errorMessage || 'meta_error',
+          eventsReceived: result.eventsReceived,
+          expectedEvents,
+          eventId: fresh.event_id,
+          fbtraceId: result.fbtraceId,
+        });
+
+        if (result.ok && evidence.tier === 'api_accepted') {
           this.db.markSent(row.id, result.bodyRedacted);
           await this.logMetaAccepted({
             eventName: fresh.event_name,
@@ -146,11 +170,32 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
             fbtraceId: result.fbtraceId,
             eventsReceived: result.eventsReceived,
             httpStatus: result.httpStatus,
+            expectedEvents,
+            correlated: evidence.correlated,
           });
           continue;
         }
 
-        if (fresh.event_name === 'LeadSubmitted') {
+        if (result.ok && evidence.tier !== 'api_accepted') {
+          await this.logMetaConversion({
+            stage: 'meta_rejected',
+            eventName: fresh.event_name,
+            reason: evidence.reason || 'insufficient_meta_acceptance_evidence',
+            eventId: fresh.event_id,
+            leadId: fresh.lead_id,
+            idempotencyKey: fresh.idempotency_key,
+            deliveryLane: fresh.delivery_lane,
+            details: {
+              fbtrace_id: result.fbtraceId,
+              events_received: result.eventsReceived,
+              expected_events: expectedEvents,
+              http_status: result.httpStatus,
+              dataset_id: fresh.dataset_id,
+              acceptance_tier: evidence.tier,
+              note: 'api_http_ok_but_not_counted_as_meta_accepted',
+            },
+          });
+        } else if (fresh.event_name === 'LeadSubmitted') {
           await this.logMetaConversion({
             stage: 'meta_rejected',
             eventName: fresh.event_name,
@@ -162,8 +207,10 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
             details: {
               fbtrace_id: result.fbtraceId,
               events_received: result.eventsReceived,
+              expected_events: expectedEvents,
               http_status: result.httpStatus,
               dataset_id: fresh.dataset_id,
+              acceptance_tier: evidence.tier,
             },
           });
         }
@@ -175,7 +222,12 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
           Math.pow(2, Math.min(attempts, 8)) * 5,
         );
         const next = new Date(Date.now() + backoffSec * 1000).toISOString();
-        this.db.markRetry(row.id, result.errorMessage || 'unknown', next, dead);
+        this.db.markRetry(
+          row.id,
+          result.errorMessage || evidence.reason || 'unknown',
+          next,
+          dead,
+        );
         this.logger.warn(
           `outbox id=${row.id} event=${row.event_name} attempt=${attempts} dead=${dead}`,
         );
@@ -227,6 +279,36 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
     ).trim();
   }
 
+  /** true = consent false en leads; null = no consultable. */
+  private async supabaseLeadAdsConsentFalse(
+    leadId: string,
+  ): Promise<boolean | null> {
+    const url = this.supabaseUrl();
+    const key = this.serviceRoleKey();
+    if (!url || !key || !leadId) return null;
+    try {
+      const qs = new URLSearchParams({
+        select: 'meta_ads_consent',
+        id: `eq.${leadId}`,
+        limit: '1',
+      });
+      const res = await fetch(`${url}/rest/v1/leads?${qs}`, {
+        headers: {
+          apikey: key,
+          Authorization: `Bearer ${key}`,
+        },
+      });
+      if (!res.ok) return null;
+      const rows = (await res.json()) as Array<{
+        meta_ads_consent: boolean | null;
+      }>;
+      if (!rows.length) return null;
+      return rows[0].meta_ads_consent === false;
+    } catch {
+      return null;
+    }
+  }
+
   private async logMetaAccepted(input: {
     eventName: string;
     eventId: string;
@@ -237,6 +319,8 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
     fbtraceId: string | null;
     eventsReceived: number | null;
     httpStatus: number;
+    expectedEvents: number;
+    correlated: boolean;
   }) {
     await this.logMetaConversion({
       stage: 'meta_accepted',
@@ -249,14 +333,16 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
       details: {
         fbtrace_id: input.fbtraceId,
         events_received: input.eventsReceived,
+        expected_events: input.expectedEvents,
         http_status: input.httpStatus,
         dataset_id: input.datasetId,
-        correlated: Boolean(input.eventId && input.fbtraceId),
+        correlated: input.correlated,
+        acceptance_layer: 'graph_api',
+        events_manager: 'not_verified_here',
       },
     });
   }
 
-  /** Best-effort bitácora Supabase; no bloquea el worker. */
   private async logMetaConversion(input: {
     stage: string;
     eventName: string;
