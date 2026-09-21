@@ -8,12 +8,32 @@ export type WaCloudReferral = {
   fieldPath: string
 }
 
+/**
+ * Resultado de extracción CTWA sin valores sensibles.
+ * Distingue ausencia de bloque referral vs clid ausente/rechazado vs OK.
+ */
+export type CtwaExtractStatus =
+  | 'no_referral_object'
+  | 'clid_absent'
+  | 'clid_rejected'
+  | 'extracted'
+
+export type CtwaExtractDiag = {
+  status: CtwaExtractStatus
+  referral_object_present: boolean
+  /** true si existe clave ctwa_clid o ctwaClid (valor no se guarda aquí). */
+  ctwa_clid_key_present: boolean
+  source_type_key_present: boolean
+  source_id_key_present: boolean
+}
+
 export type WaCloudInboundMessage = {
   wamid: string
   waIdRaw: string
   waIdNormalized: string | null
   timestamp: string | null
   referral: WaCloudReferral | null
+  ctwaExtract: CtwaExtractDiag
 }
 
 export type WaCloudParsedChange = {
@@ -38,32 +58,100 @@ function asString(value: unknown): string | null {
   return text || null
 }
 
-function cleanClid(raw: unknown): string | null {
+function cleanClid(raw: unknown): {
+  clid: string | null
+  rejected: boolean
+  keyHadValue: boolean
+} {
+  if (raw === undefined || raw === null) {
+    return { clid: null, rejected: false, keyHadValue: false }
+  }
   const value = asString(raw)
-  if (!value || value.length > 512) return null
-  if (/^(null|undefined|none|n\/a)$/i.test(value)) return null
-  return value
+  if (!value) {
+    return { clid: null, rejected: true, keyHadValue: true }
+  }
+  if (value.length > 512) {
+    return { clid: null, rejected: true, keyHadValue: true }
+  }
+  if (/^(null|undefined|none|n\/a)$/i.test(value)) {
+    return { clid: null, rejected: true, keyHadValue: true }
+  }
+  return { clid: value, rejected: false, keyHadValue: true }
 }
 
-function parseReferral(
-  message: Record<string, unknown>,
-): WaCloudReferral | null {
+/**
+ * Parsea referral. No inventa CTWA.
+ * Devuelve diag aunque referral sea null (para distinguir causas de seen_no_referral).
+ */
+export function parseReferral(message: Record<string, unknown>): {
+  referral: WaCloudReferral | null
+  extract: CtwaExtractDiag
+} {
   const referral = asRecord(message.referral)
-  if (!referral) return null
-  const ctwaClid = cleanClid(referral.ctwa_clid ?? referral.ctwaClid)
-  if (!ctwaClid) return null
+  if (!referral) {
+    return {
+      referral: null,
+      extract: {
+        status: 'no_referral_object',
+        referral_object_present: false,
+        ctwa_clid_key_present: false,
+        source_type_key_present: false,
+        source_id_key_present: false,
+      },
+    }
+  }
+
+  const clidKeyPresent =
+    Object.prototype.hasOwnProperty.call(referral, 'ctwa_clid') ||
+    Object.prototype.hasOwnProperty.call(referral, 'ctwaClid')
+  const sourceTypeKeyPresent =
+    Object.prototype.hasOwnProperty.call(referral, 'source_type') ||
+    Object.prototype.hasOwnProperty.call(referral, 'sourceType')
+  const sourceIdKeyPresent =
+    Object.prototype.hasOwnProperty.call(referral, 'source_id') ||
+    Object.prototype.hasOwnProperty.call(referral, 'sourceId')
+
+  const cleaned = cleanClid(referral.ctwa_clid ?? referral.ctwaClid)
+  if (!cleaned.clid) {
+    const status: CtwaExtractStatus =
+      !clidKeyPresent || !cleaned.keyHadValue ? 'clid_absent' : 'clid_rejected'
+    return {
+      referral: null,
+      extract: {
+        status,
+        referral_object_present: true,
+        ctwa_clid_key_present: clidKeyPresent,
+        source_type_key_present: sourceTypeKeyPresent,
+        source_id_key_present: sourceIdKeyPresent,
+      },
+    }
+  }
+
   return {
-    ctwaClid,
-    sourceId: asString(referral.source_id ?? referral.sourceId),
-    sourceUrl: asString(referral.source_url ?? referral.sourceUrl)?.slice(0, 2000) ?? null,
-    sourceType: asString(referral.source_type ?? referral.sourceType)?.slice(0, 64) ?? null,
-    fieldPath: 'messages[].referral.ctwa_clid',
+    referral: {
+      ctwaClid: cleaned.clid,
+      sourceId: asString(referral.source_id ?? referral.sourceId),
+      sourceUrl:
+        asString(referral.source_url ?? referral.sourceUrl)?.slice(0, 2000) ??
+        null,
+      sourceType:
+        asString(referral.source_type ?? referral.sourceType)?.slice(0, 64) ??
+        null,
+      fieldPath: 'messages[].referral.ctwa_clid',
+    },
+    extract: {
+      status: 'extracted',
+      referral_object_present: true,
+      ctwa_clid_key_present: true,
+      source_type_key_present: sourceTypeKeyPresent,
+      source_id_key_present: sourceIdKeyPresent,
+    },
   }
 }
 
 /**
  * Extrae mensajes inbound del payload Cloud API (object=whatsapp_business_account).
- * No inventa referral: solo si Meta lo envía con ctwa_clid.
+ * No inventa referral: solo si Meta lo envía con ctwa_clid usable.
  */
 export function parseWhatsAppCloudWebhookBody(
   body: unknown,
@@ -101,15 +189,16 @@ export function parseWhatsAppCloudWebhookBody(
         const wamid = asString(msgRec.id)
         const waIdRaw = asString(msgRec.from)
         if (!wamid || !waIdRaw) continue
+        const { referral, extract } = parseReferral(msgRec)
         messages.push({
           wamid,
           waIdRaw,
           waIdNormalized: normalizePhoneE164Digits(waIdRaw),
           timestamp: asString(msgRec.timestamp),
-          referral: parseReferral(msgRec),
+          referral,
+          ctwaExtract: extract,
         })
       }
-      // statuses[] u otros: no son inbound de usuario; se ignoran sin error.
       if (!messages.length && Array.isArray(value.statuses)) continue
       changes.push({
         wabaId,

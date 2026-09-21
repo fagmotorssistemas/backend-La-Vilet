@@ -204,6 +204,7 @@ export class WhatsappWebhookService {
   ): Promise<{ duplicate: boolean; linkStatus: string }> {
     const hasCtwa = Boolean(message.referral?.ctwaClid)
     const initialStatus = hasCtwa ? 'pending_link' : 'seen_no_referral'
+    const extract = message.ctwaExtract
     const { inserted, row } = this.db.insertWaCloudReceipt({
       wamid: message.wamid,
       waIdRaw: message.waIdRaw,
@@ -217,6 +218,10 @@ export class WhatsappWebhookService {
       sourceUrl: message.referral?.sourceUrl ?? null,
       fieldPath: message.referral?.fieldPath ?? null,
       linkStatus: initialStatus,
+      ctwaExtractStatus: extract.status,
+      referralObjectPresent: extract.referral_object_present,
+      ctwaClidKeyPresent: extract.ctwa_clid_key_present,
+      messageTimestamp: message.timestamp,
     })
 
     this.logger.log(
@@ -226,6 +231,12 @@ export class WhatsappWebhookService {
         has_ctwa: hasCtwa,
         inserted,
         link_status: row.link_status,
+        ctwa_extract_status: extract.status,
+        referral_object_present: extract.referral_object_present,
+        ctwa_clid_key_present: extract.ctwa_clid_key_present,
+        source_type_key_present: extract.source_type_key_present,
+        source_id_key_present: extract.source_id_key_present,
+        message_timestamp_present: Boolean(message.timestamp),
         // sin clid, wa_id ni texto
       }),
     )
@@ -234,6 +245,7 @@ export class WhatsappWebhookService {
       return { duplicate: true, linkStatus: row.link_status }
     }
     if (!hasCtwa) {
+      // Sin CTWA usable: no correlaciona lead (kommo_id/lead_id quedan null a propósito).
       return { duplicate: false, linkStatus: 'seen_no_referral' }
     }
 

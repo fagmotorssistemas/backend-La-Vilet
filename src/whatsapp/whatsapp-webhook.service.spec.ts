@@ -154,16 +154,19 @@ describe('WhatsappWebhookService', () => {
     cleanup()
   })
 
-  it('sin referral: persiste seen_no_referral (no inventa CTWA)', async () => {
+  it('sin referral: persiste seen_no_referral + extract no_referral_object', async () => {
     const { service, db, cleanup } = makeService({ ...baseEnv })
     const result = await service.processSignedWebhook(
       metaBody({ wamid: 'wamid.NOREF', ctwaClid: null }),
     )
     expect(result.ok && result.noReferral).toBe(1)
-    expect(db.getWaCloudReceipt('wamid.NOREF')?.link_status).toBe(
-      'seen_no_referral',
-    )
-    expect(db.getWaCloudReceipt('wamid.NOREF')?.has_ctwa).toBe(0)
+    const row = db.getWaCloudReceipt('wamid.NOREF')
+    expect(row?.link_status).toBe('seen_no_referral')
+    expect(row?.has_ctwa).toBe(0)
+    expect(row?.kommo_id).toBeNull()
+    expect(row?.lead_id).toBeNull()
+    expect(row?.ctwa_extract_status).toBe('no_referral_object')
+    expect(row?.referral_object_present).toBe(0)
     cleanup()
   })
 

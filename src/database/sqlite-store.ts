@@ -46,6 +46,11 @@ export type WaCloudReceiptRow = {
   source_id: string | null
   source_url: string | null
   field_path: string | null
+  /** Diagnóstico extracción: no_referral_object | clid_absent | clid_rejected | extracted */
+  ctwa_extract_status: string | null
+  referral_object_present: number
+  ctwa_clid_key_present: number
+  message_timestamp: string | null
   link_status: string
   lead_id: string | null
   contact_id: string | null
@@ -210,7 +215,40 @@ export class SqliteOutboxStore {
       .prepare(
         `INSERT OR IGNORE INTO schema_migrations (id) VALUES ('007_wa_cloud_message_receipts')`,
       )
-      .run();
+      .run()
+
+    // Diagnóstico CTWA: distinguir no_referral_object vs clid_absent vs clid_rejected.
+    // No almacena cuerpos ni valores de clid adicionales (ctwa_clid ya existía solo si extracted).
+    const receiptCols = (
+      this.db.prepare(`PRAGMA table_info(wa_cloud_message_receipts)`).all() as {
+        name: string
+      }[]
+    ).map((c) => c.name)
+    if (!receiptCols.includes('ctwa_extract_status')) {
+      this.db.exec(
+        `ALTER TABLE wa_cloud_message_receipts ADD COLUMN ctwa_extract_status TEXT`,
+      )
+    }
+    if (!receiptCols.includes('referral_object_present')) {
+      this.db.exec(
+        `ALTER TABLE wa_cloud_message_receipts ADD COLUMN referral_object_present INTEGER NOT NULL DEFAULT 0`,
+      )
+    }
+    if (!receiptCols.includes('ctwa_clid_key_present')) {
+      this.db.exec(
+        `ALTER TABLE wa_cloud_message_receipts ADD COLUMN ctwa_clid_key_present INTEGER NOT NULL DEFAULT 0`,
+      )
+    }
+    if (!receiptCols.includes('message_timestamp')) {
+      this.db.exec(
+        `ALTER TABLE wa_cloud_message_receipts ADD COLUMN message_timestamp TEXT`,
+      )
+    }
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO schema_migrations (id) VALUES ('008_wa_cloud_ctwa_extract_diag')`,
+      )
+      .run()
   }
 
   insertWaCloudReceipt(input: {
@@ -226,6 +264,10 @@ export class SqliteOutboxStore {
     sourceUrl: string | null
     fieldPath: string | null
     linkStatus: string
+    ctwaExtractStatus: string
+    referralObjectPresent: boolean
+    ctwaClidKeyPresent: boolean
+    messageTimestamp: string | null
   }): { inserted: boolean; row: WaCloudReceiptRow } {
     const existing = this.getWaCloudReceipt(input.wamid)
     if (existing) {
@@ -236,11 +278,15 @@ export class SqliteOutboxStore {
         `INSERT INTO wa_cloud_message_receipts (
           wamid, wa_id_normalized, wa_id_raw, phone_number_id, waba_id,
           has_ctwa, ctwa_clid, referral_source_type, source_id, source_url,
-          field_path, link_status
+          field_path, link_status,
+          ctwa_extract_status, referral_object_present, ctwa_clid_key_present,
+          message_timestamp
         ) VALUES (
           @wamid, @waIdNormalized, @waIdRaw, @phoneNumberId, @wabaId,
           @hasCtwa, @ctwaClid, @referralSourceType, @sourceId, @sourceUrl,
-          @fieldPath, @linkStatus
+          @fieldPath, @linkStatus,
+          @ctwaExtractStatus, @referralObjectPresent, @ctwaClidKeyPresent,
+          @messageTimestamp
         )`,
       )
       .run({
@@ -256,6 +302,10 @@ export class SqliteOutboxStore {
         sourceUrl: input.sourceUrl,
         fieldPath: input.fieldPath,
         linkStatus: input.linkStatus,
+        ctwaExtractStatus: input.ctwaExtractStatus,
+        referralObjectPresent: input.referralObjectPresent ? 1 : 0,
+        ctwaClidKeyPresent: input.ctwaClidKeyPresent ? 1 : 0,
+        messageTimestamp: input.messageTimestamp,
       })
     const row = this.getWaCloudReceipt(input.wamid)
     if (!row) {
