@@ -180,7 +180,43 @@ describe('WhatsappWebhookService', () => {
     cleanup()
   })
 
-  it('correlaciona lead único y llama preserve; ambiguo queda pending', async () => {
+  function mockLeadLookup(
+    fetchMock: jest.SpyInstance,
+    byDigits: Record<
+      string,
+      Array<Record<string, unknown>> | (() => Array<Record<string, unknown>>)
+    >,
+  ) {
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('lv_app_preserve_ctwa')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: true, action: 'inserted' }),
+        } as Response
+      }
+      if (url.includes('/rest/v1/leads')) {
+        const decoded = decodeURIComponent(url)
+        const hit = Object.entries(byDigits).find(([digits]) =>
+          decoded.includes(digits),
+        )
+        const rows = hit
+          ? typeof hit[1] === 'function'
+            ? hit[1]()
+            : hit[1]
+          : []
+        return {
+          ok: true,
+          status: 200,
+          json: async () => rows,
+        } as Response
+      }
+      return { ok: false, status: 404, json: async () => ({}) } as Response
+    })
+  }
+
+  it('correlaciona lead único (CRM con +) y ambiguo queda pending', async () => {
     const { service, db, cleanup } = makeService({
       ...baseEnv,
       SUPABASE_URL: 'https://example.supabase.co',
@@ -188,28 +224,39 @@ describe('WhatsappWebhookService', () => {
     })
     const fetchMock = jest.spyOn(global, 'fetch' as never) as jest.SpyInstance
 
-    // 1) match único → linked + preserve
-    fetchMock
-      .mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => [
-          {
-            id: '11111111-1111-4111-8111-111111111111',
-            contact_id: '42',
-            kommo_id: 99,
-            tenant_id: '22222222-2222-4222-8222-222222222222',
-            project_id: '33333333-3333-4333-8333-333333333333',
-            whatsapp_id: '593922222222',
-            phone_normalized: '593922222222',
-          },
-        ],
-      } as Response)
-      .mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ ok: true, action: 'inserted' }),
-      } as Response)
+    mockLeadLookup(fetchMock, {
+      '593922222222': [
+        {
+          id: '11111111-1111-4111-8111-111111111111',
+          contact_id: '42',
+          kommo_id: 99,
+          tenant_id: '22222222-2222-4222-8222-222222222222',
+          project_id: '33333333-3333-4333-8333-333333333333',
+          whatsapp_id: null,
+          phone_normalized: '+593922222222',
+        },
+      ],
+      '593933333333': [
+        {
+          id: 'a',
+          contact_id: '1',
+          kommo_id: 1,
+          tenant_id: 't',
+          project_id: 'p',
+          whatsapp_id: null,
+          phone_normalized: '+593933333333',
+        },
+        {
+          id: 'b',
+          contact_id: '2',
+          kommo_id: 2,
+          tenant_id: 't',
+          project_id: 'p',
+          whatsapp_id: null,
+          phone_normalized: '+593933333333',
+        },
+      ],
+    })
 
     const linked = await service.processSignedWebhook(
       metaBody({
@@ -221,32 +268,6 @@ describe('WhatsappWebhookService', () => {
     expect(linked.ok && linked.linked).toBe(1)
     expect(db.getWaCloudReceipt('wamid.LINK')?.link_status).toBe('linked')
     expect(db.getWaCloudReceipt('wamid.LINK')?.supabase_synced).toBe(1)
-
-    // 2) ambiguo
-    fetchMock.mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      json: async () => [
-        {
-          id: 'a',
-          contact_id: '1',
-          kommo_id: 1,
-          tenant_id: 't',
-          project_id: 'p',
-          whatsapp_id: '593933333333',
-          phone_normalized: '593933333333',
-        },
-        {
-          id: 'b',
-          contact_id: '2',
-          kommo_id: 2,
-          tenant_id: 't',
-          project_id: 'p',
-          whatsapp_id: '593933333333',
-          phone_normalized: '593933333333',
-        },
-      ],
-    } as Response)
 
     const amb = await service.processSignedWebhook(
       metaBody({
@@ -264,6 +285,12 @@ describe('WhatsappWebhookService', () => {
       String(c[0]).includes('lv_app_preserve_ctwa'),
     )
     expect(preserveCalls.length).toBe(1)
+    const leadLookupUrls = fetchMock.mock.calls
+      .map((c) => String(c[0]))
+      .filter((u) => u.includes('/rest/v1/leads'))
+    expect(leadLookupUrls.some((u) => decodeURIComponent(u).includes('+593'))).toBe(
+      true,
+    )
 
     cleanup()
   })
@@ -275,12 +302,24 @@ describe('WhatsappWebhookService', () => {
       SUPABASE_SERVICE_ROLE_KEY: 'service-role-test',
     })
     const fetchMock = jest.spyOn(global, 'fetch' as never) as jest.SpyInstance
+    let leadReady = false
 
-    fetchMock.mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      json: async () => [],
-    } as Response)
+    mockLeadLookup(fetchMock, {
+      '593944444444': () =>
+        leadReady
+          ? [
+              {
+                id: '44444444-4444-4444-8444-444444444444',
+                contact_id: '77',
+                kommo_id: 77,
+                tenant_id: '55555555-5555-4555-8555-555555555555',
+                project_id: '66666666-6666-4666-8666-666666666666',
+                whatsapp_id: null,
+                phone_normalized: '+593944444444',
+              },
+            ]
+          : [],
+    })
 
     await service.processSignedWebhook(
       metaBody({
@@ -290,29 +329,9 @@ describe('WhatsappWebhookService', () => {
       }),
     )
     expect(db.getWaCloudReceipt('wamid.EARLY')?.link_status).toBe('pending_link')
+    expect(db.getWaCloudReceipt('wamid.EARLY')?.last_error).toBe('lead_not_found')
 
-    fetchMock
-      .mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => [
-          {
-            id: '44444444-4444-4444-8444-444444444444',
-            contact_id: '77',
-            kommo_id: 77,
-            tenant_id: '55555555-5555-4555-8555-555555555555',
-            project_id: '66666666-6666-4666-8666-666666666666',
-            whatsapp_id: '593944444444',
-            phone_normalized: '593944444444',
-          },
-        ],
-      } as Response)
-      .mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ ok: true, action: 'inserted' }),
-      } as Response)
-
+    leadReady = true
     const recon = await service.reconcilePending()
     expect(recon.linked).toBe(1)
     expect(db.getWaCloudReceipt('wamid.EARLY')?.link_status).toBe('linked')
@@ -326,27 +345,19 @@ describe('WhatsappWebhookService', () => {
       SUPABASE_SERVICE_ROLE_KEY: 'service-role-test',
     })
     const fetchMock = jest.spyOn(global, 'fetch' as never) as jest.SpyInstance
-    fetchMock
-      .mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => [
-          {
-            id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
-            contact_id: '1',
-            kommo_id: 1,
-            tenant_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
-            project_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
-            whatsapp_id: '593911111111',
-            phone_normalized: '593911111111',
-          },
-        ],
-      } as Response)
-      .mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ ok: true, action: 'inserted' }),
-      } as Response)
+    mockLeadLookup(fetchMock, {
+      '593911111111': [
+        {
+          id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+          contact_id: '1',
+          kommo_id: 1,
+          tenant_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+          project_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+          whatsapp_id: null,
+          phone_normalized: '+593911111111',
+        },
+      ],
+    })
 
     await service.processSignedWebhook(
       metaBody({

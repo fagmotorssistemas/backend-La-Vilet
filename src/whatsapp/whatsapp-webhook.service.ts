@@ -9,6 +9,10 @@ import {
   type WaCloudParsedChange,
 } from './whatsapp-payload'
 import { verifyMetaHubSignature256 } from './whatsapp-signature'
+import {
+  quotePostgrestEqValue,
+  waLeadLookupCandidates,
+} from './wa-lead-lookup'
 
 export type LeadMatch = {
   id: string
@@ -327,14 +331,21 @@ export class WhatsappWebhookService implements OnModuleInit, OnModuleDestroy {
     }
 
     const matches = await this.findLeadMatches(row.wa_id_normalized, row.wa_id_raw)
-    if (matches.length === 0) {
+    if (matches.error === 'lead_lookup_failed') {
       this.db.updateWaCloudReceiptLink(wamid, {
         linkStatus: 'pending_link',
-        lastError: null,
+        lastError: 'lead_lookup_failed',
       })
       return 'pending_link'
     }
-    if (matches.length > 1) {
+    if (matches.rows.length === 0) {
+      this.db.updateWaCloudReceiptLink(wamid, {
+        linkStatus: 'pending_link',
+        lastError: 'lead_not_found',
+      })
+      return 'pending_link'
+    }
+    if (matches.rows.length > 1) {
       this.db.updateWaCloudReceiptLink(wamid, {
         linkStatus: 'pending_ambiguous',
         lastError: 'multiple_leads_for_wa_id',
@@ -342,13 +353,13 @@ export class WhatsappWebhookService implements OnModuleInit, OnModuleDestroy {
       this.logger.warn(
         JSON.stringify({
           event: 'wa_cloud_correlate_ambiguous',
-          match_count: matches.length,
+          match_count: matches.rows.length,
         }),
       )
       return 'pending_ambiguous'
     }
 
-    const lead = matches[0]
+    const lead = matches.rows[0]
     if (!lead.contact_id || lead.kommo_id == null) {
       this.db.updateWaCloudReceiptLink(wamid, {
         linkStatus: 'pending_link',
@@ -404,25 +415,30 @@ export class WhatsappWebhookService implements OnModuleInit, OnModuleDestroy {
   private async findLeadMatches(
     waIdNormalized: string | null,
     waIdRaw: string,
-  ): Promise<LeadMatch[]> {
+  ): Promise<{ rows: LeadMatch[]; error?: 'lead_lookup_failed' }> {
     const url = String(this.config.get<string>('SUPABASE_URL') || '').trim()
     const key = String(
       this.config.get<string>('SUPABASE_SERVICE_ROLE_KEY') || '',
     ).trim()
     if (!url || !key) {
-      return []
+      return { rows: [], error: 'lead_lookup_failed' }
     }
 
-    const candidates = new Set<string>()
-    if (waIdNormalized) candidates.add(waIdNormalized)
-    const rawDigits = String(waIdRaw || '').replace(/\D/g, '')
-    if (rawDigits) candidates.add(rawDigits)
+    const candidates = waLeadLookupCandidates(waIdNormalized, waIdRaw)
+    if (!candidates.length) {
+      return { rows: [] }
+    }
 
     const byId = new Map<string, LeadMatch>()
+    let lookupsOk = 0
+    let lookupsFailed = 0
+
     for (const candidate of candidates) {
+      const quoted = quotePostgrestEqValue(candidate)
       const qs = new URLSearchParams({
-        select: 'id,contact_id,kommo_id,tenant_id,project_id,whatsapp_id,phone_normalized',
-        or: `(whatsapp_id.eq.${candidate},phone_normalized.eq.${candidate})`,
+        select:
+          'id,contact_id,kommo_id,tenant_id,project_id,whatsapp_id,phone_normalized',
+        or: `(whatsapp_id.eq.${quoted},phone_normalized.eq.${quoted})`,
         limit: '5',
       })
       const res = await fetch(`${url}/rest/v1/leads?${qs}`, {
@@ -432,6 +448,7 @@ export class WhatsappWebhookService implements OnModuleInit, OnModuleDestroy {
         },
       })
       if (!res.ok) {
+        lookupsFailed += 1
         this.logger.warn(
           JSON.stringify({
             event: 'wa_cloud_lead_lookup_failed',
@@ -440,12 +457,17 @@ export class WhatsappWebhookService implements OnModuleInit, OnModuleDestroy {
         )
         continue
       }
+      lookupsOk += 1
       const rows = (await res.json()) as LeadMatch[]
       for (const row of rows) {
         if (row?.id) byId.set(row.id, row)
       }
     }
-    return [...byId.values()]
+
+    if (lookupsOk === 0 && lookupsFailed > 0) {
+      return { rows: [], error: 'lead_lookup_failed' }
+    }
+    return { rows: [...byId.values()] }
   }
 
   private async syncPreserveCtwa(input: {
