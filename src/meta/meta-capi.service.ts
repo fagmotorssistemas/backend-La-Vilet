@@ -67,6 +67,17 @@ export class MetaCapiService {
     return this.config.get<string>('META_API_VERSION')?.trim() || 'v21.0';
   }
 
+  /**
+   * Versión Graph para BM / LeadSubmitted.
+   * Evidencia local: POST dataset mensajería falló en v21 y aceptó en v26;
+   * no altera META_API_VERSION del CAPI web.
+   */
+  get waApiVersion(): string {
+    return (
+      this.config.get<string>('META_WA_API_VERSION')?.trim() || 'v26.0'
+    );
+  }
+
   /** Token CAPI web (pixel/dataset website). Nunca usar para BM WhatsApp. */
   get accessToken(): string {
     return String(
@@ -286,6 +297,10 @@ export class MetaCapiService {
       : this.accessToken;
   }
 
+  apiVersionForCredentialLane(lane: 'web' | 'whatsapp_messaging'): string {
+    return lane === 'whatsapp_messaging' ? this.waApiVersion : this.apiVersion;
+  }
+
   async sendToMeta(
     datasetId: string,
     payload: Record<string, unknown>,
@@ -323,7 +338,8 @@ export class MetaCapiService {
     }
 
     const timeout = Number(this.config.get('META_HTTP_TIMEOUT_MS')) || 10000;
-    const url = `https://graph.facebook.com/${this.apiVersion}/${datasetId}/events`;
+    const apiVersion = this.apiVersionForCredentialLane(credentialLane);
+    const url = `https://graph.facebook.com/${apiVersion}/${datasetId}/events`;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
 

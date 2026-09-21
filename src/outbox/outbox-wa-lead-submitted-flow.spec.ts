@@ -202,7 +202,7 @@ describe('OutboxService — LeadSubmitted Nest flow (Graph simulado)', () => {
     });
   }
 
-  it('happy path: claim → consent true → Graph WA v21 dataset mensajería → sent', async () => {
+  it('happy path: claim → consent true → Graph WA v26 dataset mensajería → sent', async () => {
     insertLs();
     await makeOutbox(true).tick();
 
@@ -216,7 +216,7 @@ describe('OutboxService — LeadSubmitted Nest flow (Graph simulado)', () => {
     expect(row.dataset_id).toBe(MSG_DATASET);
     expect(row.event_id).toBe(EVENT_ID);
     expect(graphCalls).toHaveLength(1);
-    expect(graphCalls[0].url).toContain(`graph.facebook.com/v21.0/${MSG_DATASET}/events`);
+    expect(graphCalls[0].url).toContain(`graph.facebook.com/v26.0/${MSG_DATASET}/events`);
     expect(graphCalls[0].url).not.toContain(WEB_DATASET);
     expect(graphCalls[0].auth).toBe('Bearer wa-token-LOCAL-ONLY');
     expect(graphCalls[0].auth).not.toContain('web-token');

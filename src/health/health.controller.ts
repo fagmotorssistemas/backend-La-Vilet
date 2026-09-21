@@ -26,6 +26,7 @@ export class HealthController {
       mode: this.meta.mode,
       dataset_configured: Boolean(this.meta.datasetId),
       api_version: this.meta.apiVersion,
+      wa_api_version: this.meta.waApiVersion,
       test_code_present: Boolean(this.meta.testEventCode),
       token_configured: Boolean(this.meta.accessToken),
       wa_messaging_token_configured: Boolean(

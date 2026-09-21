@@ -62,11 +62,11 @@ describe('WA messaging credential lane', () => {
     expect(authHeaders).toEqual(['Bearer wa-token-SECRET']);
     expect(authHeaders[0]).not.toContain('web-token');
     expect(String((global.fetch as jest.Mock).mock.calls[0][0])).toContain(
-      'graph.facebook.com/v21.0/4419657838288963/events',
+      'graph.facebook.com/v26.0/4419657838288963/events',
     );
   });
 
-  it('website Lead POSTea con Bearer web', async () => {
+  it('website Lead POSTea con Bearer web y META_API_VERSION', async () => {
     const authHeaders: string[] = [];
     global.fetch = jest.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       const headers = init?.headers as Record<string, string>;
