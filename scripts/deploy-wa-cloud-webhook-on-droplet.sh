@@ -4,7 +4,7 @@
 set -euo pipefail
 
 APP_DIR="${APP_DIR:-/root/lavilet-meta-capi}"
-SHA_EXPECTED="5685aadd31dde3e687b079dbe8bec415dbab6ad5"
+SHA_EXPECTED="${SHA_EXPECTED:-9d5b5e7b2a56c83eb533eaea10b9447f6976d65b}"
 CALLBACK="https://capi.lavilett.com/api/whatsapp/webhook"
 WABA="1410020224338488"
 PHONE_ID="1372191202637500"
