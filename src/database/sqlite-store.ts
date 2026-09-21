@@ -33,6 +33,31 @@ export type OutboxRow = {
   sent_at: string | null;
 };
 
+/** Recibo Cloud API WA: atribución CTWA + correlación CRM (sin cuerpo de mensaje). */
+export type WaCloudReceiptRow = {
+  wamid: string
+  wa_id_normalized: string | null
+  wa_id_raw: string
+  phone_number_id: string
+  waba_id: string
+  has_ctwa: number
+  ctwa_clid: string | null
+  referral_source_type: string | null
+  source_id: string | null
+  source_url: string | null
+  field_path: string | null
+  link_status: string
+  lead_id: string | null
+  contact_id: string | null
+  kommo_id: number | null
+  tenant_id: string | null
+  project_id: string | null
+  supabase_synced: number
+  last_error: string | null
+  created_at: string
+  updated_at: string
+}
+
 /** Capa SQLite sin Nest — testeable y usada por DatabaseService. */
 export class SqliteOutboxStore {
   constructor(private readonly db: Database.Database) {}
@@ -151,6 +176,170 @@ export class SqliteOutboxStore {
         `INSERT OR IGNORE INTO schema_migrations (id) VALUES ('006_consent_state_versioned')`,
       )
       .run();
+
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS wa_cloud_message_receipts (
+        wamid TEXT PRIMARY KEY,
+        wa_id_normalized TEXT,
+        wa_id_raw TEXT NOT NULL,
+        phone_number_id TEXT NOT NULL,
+        waba_id TEXT NOT NULL,
+        has_ctwa INTEGER NOT NULL DEFAULT 0,
+        ctwa_clid TEXT,
+        referral_source_type TEXT,
+        source_id TEXT,
+        source_url TEXT,
+        field_path TEXT,
+        link_status TEXT NOT NULL,
+        lead_id TEXT,
+        contact_id TEXT,
+        kommo_id INTEGER,
+        tenant_id TEXT,
+        project_id TEXT,
+        supabase_synced INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_wa_receipts_link_status
+        ON wa_cloud_message_receipts(link_status);
+      CREATE INDEX IF NOT EXISTS idx_wa_receipts_wa_id
+        ON wa_cloud_message_receipts(wa_id_normalized);
+    `);
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO schema_migrations (id) VALUES ('007_wa_cloud_message_receipts')`,
+      )
+      .run();
+  }
+
+  insertWaCloudReceipt(input: {
+    wamid: string
+    waIdRaw: string
+    waIdNormalized: string | null
+    phoneNumberId: string
+    wabaId: string
+    hasCtwa: boolean
+    ctwaClid: string | null
+    referralSourceType: string | null
+    sourceId: string | null
+    sourceUrl: string | null
+    fieldPath: string | null
+    linkStatus: string
+  }): { inserted: boolean; row: WaCloudReceiptRow } {
+    const existing = this.getWaCloudReceipt(input.wamid)
+    if (existing) {
+      return { inserted: false, row: existing }
+    }
+    this.db
+      .prepare(
+        `INSERT INTO wa_cloud_message_receipts (
+          wamid, wa_id_normalized, wa_id_raw, phone_number_id, waba_id,
+          has_ctwa, ctwa_clid, referral_source_type, source_id, source_url,
+          field_path, link_status
+        ) VALUES (
+          @wamid, @waIdNormalized, @waIdRaw, @phoneNumberId, @wabaId,
+          @hasCtwa, @ctwaClid, @referralSourceType, @sourceId, @sourceUrl,
+          @fieldPath, @linkStatus
+        )`,
+      )
+      .run({
+        wamid: input.wamid,
+        waIdNormalized: input.waIdNormalized,
+        waIdRaw: input.waIdRaw,
+        phoneNumberId: input.phoneNumberId,
+        wabaId: input.wabaId,
+        hasCtwa: input.hasCtwa ? 1 : 0,
+        ctwaClid: input.ctwaClid,
+        referralSourceType: input.referralSourceType,
+        sourceId: input.sourceId,
+        sourceUrl: input.sourceUrl,
+        fieldPath: input.fieldPath,
+        linkStatus: input.linkStatus,
+      })
+    const row = this.getWaCloudReceipt(input.wamid)
+    if (!row) {
+      throw new Error('wa_receipt_insert_missing')
+    }
+    return { inserted: true, row }
+  }
+
+  getWaCloudReceipt(wamid: string): WaCloudReceiptRow | null {
+    const row = this.db
+      .prepare(`SELECT * FROM wa_cloud_message_receipts WHERE wamid = ?`)
+      .get(wamid) as WaCloudReceiptRow | undefined
+    return row || null
+  }
+
+  updateWaCloudReceiptLink(
+    wamid: string,
+    patch: {
+      linkStatus: string
+      leadId?: string | null
+      contactId?: string | null
+      kommoId?: number | null
+      tenantId?: string | null
+      projectId?: string | null
+      supabaseSynced?: boolean
+      lastError?: string | null
+    },
+  ): boolean {
+    const result = this.db
+      .prepare(
+        `UPDATE wa_cloud_message_receipts
+         SET link_status = @linkStatus,
+             lead_id = COALESCE(@leadId, lead_id),
+             contact_id = COALESCE(@contactId, contact_id),
+             kommo_id = COALESCE(@kommoId, kommo_id),
+             tenant_id = COALESCE(@tenantId, tenant_id),
+             project_id = COALESCE(@projectId, project_id),
+             supabase_synced = COALESCE(@supabaseSynced, supabase_synced),
+             last_error = @lastError,
+             updated_at = datetime('now')
+         WHERE wamid = @wamid`,
+      )
+      .run({
+        wamid,
+        linkStatus: patch.linkStatus,
+        leadId: patch.leadId ?? null,
+        contactId: patch.contactId ?? null,
+        kommoId: patch.kommoId ?? null,
+        tenantId: patch.tenantId ?? null,
+        projectId: patch.projectId ?? null,
+        supabaseSynced:
+          typeof patch.supabaseSynced === 'boolean'
+            ? patch.supabaseSynced
+              ? 1
+              : 0
+            : null,
+        lastError: patch.lastError ?? null,
+      })
+    return result.changes > 0
+  }
+
+  listPendingWaCloudReceipts(limit = 50): WaCloudReceiptRow[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM wa_cloud_message_receipts
+         WHERE link_status IN ('pending_link', 'pending_ambiguous', 'sync_failed')
+           AND has_ctwa = 1
+         ORDER BY created_at ASC
+         LIMIT ?`,
+      )
+      .all(Math.max(1, Math.min(200, limit))) as WaCloudReceiptRow[]
+  }
+
+  countsWaCloudReceipts(): Record<string, number> {
+    const rows = this.db
+      .prepare(
+        `SELECT link_status AS status, COUNT(*) AS c
+         FROM wa_cloud_message_receipts
+         GROUP BY link_status`,
+      )
+      .all() as Array<{ status: string; c: number }>
+    const out: Record<string, number> = {}
+    for (const row of rows) out[row.status] = row.c
+    return out
   }
 
   recoverStuckProcessing(): number {

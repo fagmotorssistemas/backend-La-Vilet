@@ -4,6 +4,7 @@ import { MetaCapiService } from '../meta/meta-capi.service';
 import { DatabaseService } from '../database/database.service';
 import { OutboxService } from '../outbox/outbox.service';
 import { SupabaseDrainService } from '../drain/supabase-drain.service';
+import { WhatsappWebhookService } from '../whatsapp/whatsapp-webhook.service';
 
 @Controller('health')
 export class HealthController {
@@ -13,6 +14,7 @@ export class HealthController {
     private readonly db: DatabaseService,
     private readonly outbox: OutboxService,
     private readonly drain: SupabaseDrainService,
+    private readonly waWebhook: WhatsappWebhookService,
   ) {}
 
   @Get()
@@ -40,6 +42,7 @@ export class HealthController {
         worker: this.outbox.workerStatus,
       },
       supabase_drain: this.drain.status,
+      wa_cloud_webhook: this.waWebhook.healthSnapshot(),
     };
   }
 }

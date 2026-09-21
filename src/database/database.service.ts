@@ -12,9 +12,10 @@ import {
   SqliteOutboxStore,
   type DeliveryLane,
   type OutboxRow,
+  type WaCloudReceiptRow,
 } from './sqlite-store';
 
-export type { OutboxRow, DeliveryLane };
+export type { OutboxRow, DeliveryLane, WaCloudReceiptRow };
 
 @Injectable()
 export class DatabaseService implements OnModuleInit, OnModuleDestroy {
@@ -158,5 +159,30 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
 
   releaseLock(lockName: string, ownerId: string) {
     this.store.releaseLock(lockName, ownerId);
+  }
+
+  insertWaCloudReceipt(
+    input: Parameters<SqliteOutboxStore['insertWaCloudReceipt']>[0],
+  ) {
+    return this.store.insertWaCloudReceipt(input);
+  }
+
+  getWaCloudReceipt(wamid: string) {
+    return this.store.getWaCloudReceipt(wamid);
+  }
+
+  updateWaCloudReceiptLink(
+    wamid: string,
+    patch: Parameters<SqliteOutboxStore['updateWaCloudReceiptLink']>[1],
+  ) {
+    return this.store.updateWaCloudReceiptLink(wamid, patch);
+  }
+
+  listPendingWaCloudReceipts(limit?: number) {
+    return this.store.listPendingWaCloudReceipts(limit);
+  }
+
+  countsWaCloudReceipts() {
+    return this.store.countsWaCloudReceipts();
   }
 }

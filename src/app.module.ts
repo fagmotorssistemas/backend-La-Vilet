@@ -8,6 +8,7 @@ import { HealthModule } from './health/health.module';
 import { AuthModule } from './auth/auth.module';
 import { ConsentModule } from './consent/consent.module';
 import { DrainModule } from './drain/drain.module';
+import { WhatsappModule } from './whatsapp/whatsapp.module';
 
 @Module({
   imports: [
@@ -22,6 +23,7 @@ import { DrainModule } from './drain/drain.module';
     EventsModule,
     ConsentModule,
     DrainModule,
+    WhatsappModule,
     HealthModule,
   ],
 })
