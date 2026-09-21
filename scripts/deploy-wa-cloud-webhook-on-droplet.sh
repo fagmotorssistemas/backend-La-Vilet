@@ -3,7 +3,7 @@
 # No sustituye Kommo. No activa delivery CAPI WA.
 set -euo pipefail
 
-APP_DIR="${APP_DIR:-/root/lavilet-meta-capi}"
+APP_DIR="${APP_DIR:-/opt/lavilet-meta-capi}"
 SHA_EXPECTED="${SHA_EXPECTED:-$(git rev-parse origin/main)}"
 CALLBACK="https://capi.lavilett.com/api/whatsapp/webhook"
 WABA="1410020224338488"

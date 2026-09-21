@@ -20,9 +20,23 @@ export type LeadMatch = {
   phone_normalized: string | null
 }
 
+type RejectBucket = {
+  count: number
+  last_status: number
+  last_at: string
+}
+
 @Injectable()
 export class WhatsappWebhookService {
   private readonly logger = new Logger(WhatsappWebhookService.name)
+  /** Contadores en memoria (reinicio al redeploy). Solo reasons, sin PII. */
+  private readonly rejectCounts = new Map<string, RejectBucket>()
+  private lastReject: {
+    phase: 'challenge' | 'post'
+    reason: string
+    status: number
+    at: string
+  } | null = null
 
   constructor(
     private readonly config: ConfigService,
@@ -38,6 +52,25 @@ export class WhatsappWebhookService {
         'META_WA_CLOUD_WEBHOOK_RECEIVE_ENABLED',
       ),
     })
+  }
+
+  /**
+   * Diagnóstico seguro de rechazos (health + logs). Sin secretos ni payloads.
+   */
+  recordReject(
+    phase: 'challenge' | 'post',
+    reason: string,
+    status: number,
+  ): void {
+    const key = `${phase}:${reason}`
+    const prev = this.rejectCounts.get(key)
+    const at = new Date().toISOString()
+    this.rejectCounts.set(key, {
+      count: (prev?.count || 0) + 1,
+      last_status: status,
+      last_at: at,
+    })
+    this.lastReject = { phase, reason, status, at }
   }
 
   verifyChallenge(query: {
@@ -70,6 +103,10 @@ export class WhatsappWebhookService {
     return { ok: true, challenge }
   }
 
+  /**
+   * Firma Meta sobre body crudo. Secreto: únicamente META_WA_APP_SECRET
+   * (App Secret de la app La Vilet, no el token ni META_CAPI_INTERNAL_SECRET).
+   */
   verifySignature(rawBody: Buffer, signatureHeader: string | null | undefined) {
     return verifyMetaHubSignature256({
       appSecret: String(this.config.get<string>('META_WA_APP_SECRET') || ''),
@@ -394,6 +431,10 @@ export class WhatsappWebhookService {
 
   healthSnapshot() {
     const flags = this.flags()
+    const reject_counts: Record<string, RejectBucket> = {}
+    for (const [key, value] of this.rejectCounts.entries()) {
+      reject_counts[key] = value
+    }
     return {
       challenge_enabled: flags.challengeEnabled,
       receive_enabled: flags.receiveEnabled,
@@ -403,6 +444,8 @@ export class WhatsappWebhookService {
       app_secret_configured: Boolean(
         String(this.config.get<string>('META_WA_APP_SECRET') || '').trim(),
       ),
+      /** Nombre de env usado en HMAC (valor nunca expuesto). */
+      app_secret_env: 'META_WA_APP_SECRET',
       waba_id_configured: Boolean(
         String(this.config.get<string>('META_WABA_ID') || '').trim(),
       ),
@@ -410,6 +453,8 @@ export class WhatsappWebhookService {
         String(this.config.get<string>('META_WA_PHONE_NUMBER_ID') || '').trim(),
       ),
       receipt_counts: this.db.countsWaCloudReceipts(),
+      reject_counts,
+      last_reject: this.lastReject,
     }
   }
 }
