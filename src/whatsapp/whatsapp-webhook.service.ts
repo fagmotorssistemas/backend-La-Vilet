@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common'
+import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common'
 import { ConfigService } from '@nestjs/config'
 import { DatabaseService } from '../database/database.service'
 import { resolveWaCloudWebhookFlags } from './whatsapp-flags'
@@ -27,7 +27,7 @@ type RejectBucket = {
 }
 
 @Injectable()
-export class WhatsappWebhookService {
+export class WhatsappWebhookService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(WhatsappWebhookService.name)
   /** Contadores en memoria (reinicio al redeploy). Solo reasons, sin PII. */
   private readonly rejectCounts = new Map<string, RejectBucket>()
@@ -38,10 +38,74 @@ export class WhatsappWebhookService {
     at: string
   } | null = null
 
+  private reconcileTimer: NodeJS.Timeout | null = null
+  private reconcileFirst: NodeJS.Timeout | null = null
+  private reconcileRunning = false
+  private reconcileEnabled = false
+  private lastReconcileAt: string | null = null
+  private lastReconcileTried = 0
+  private lastReconcileLinked = 0
+
   constructor(
     private readonly config: ConfigService,
     private readonly db: DatabaseService,
   ) {}
+
+  onModuleInit() {
+    const raw = String(
+      this.config.get<string>('META_WA_CTWA_RECONCILE_ENABLED') ?? 'true',
+    )
+      .trim()
+      .toLowerCase()
+    if (raw === 'false' || raw === '0' || raw === 'no') {
+      this.reconcileEnabled = false
+      this.logger.log('CTWA reconcile worker deshabilitado')
+      return
+    }
+    this.reconcileEnabled = true
+    const poll = Number(this.config.get('META_WA_CTWA_RECONCILE_POLL_MS')) || 30000
+    this.reconcileTimer = setInterval(() => {
+      void this.tickReconcile()
+    }, poll)
+    this.reconcileFirst = setTimeout(() => void this.tickReconcile(), 2500)
+    this.logger.log(`CTWA reconcile worker activo (poll=${poll}ms)`)
+  }
+
+  onModuleDestroy() {
+    if (this.reconcileTimer) clearInterval(this.reconcileTimer)
+    if (this.reconcileFirst) clearTimeout(this.reconcileFirst)
+    this.reconcileTimer = null
+    this.reconcileFirst = null
+  }
+
+  private async tickReconcile() {
+    if (this.reconcileRunning || !this.reconcileEnabled) return
+    this.reconcileRunning = true
+    try {
+      const result = await this.reconcilePending()
+      this.lastReconcileAt = new Date().toISOString()
+      this.lastReconcileTried = result.tried
+      this.lastReconcileLinked = result.linked
+      if (result.tried > 0) {
+        this.logger.log(
+          JSON.stringify({
+            event: 'wa_cloud_ctwa_reconcile_tick',
+            tried: result.tried,
+            linked: result.linked,
+          }),
+        )
+      }
+    } catch (err) {
+      this.logger.warn(
+        JSON.stringify({
+          event: 'wa_cloud_ctwa_reconcile_error',
+          message: err instanceof Error ? err.message : 'unknown',
+        }),
+      )
+    } finally {
+      this.reconcileRunning = false
+    }
+  }
 
   flags() {
     return resolveWaCloudWebhookFlags({
@@ -467,6 +531,15 @@ export class WhatsappWebhookService {
       receipt_counts: this.db.countsWaCloudReceipts(),
       reject_counts,
       last_reject: this.lastReject,
+      ctwa_reconcile: {
+        enabled: this.reconcileEnabled,
+        ticking: this.reconcileRunning,
+        last_at: this.lastReconcileAt,
+        last_tried: this.lastReconcileTried,
+        last_linked: this.lastReconcileLinked,
+        poll_ms:
+          Number(this.config.get('META_WA_CTWA_RECONCILE_POLL_MS')) || 30000,
+      },
     }
   }
 }

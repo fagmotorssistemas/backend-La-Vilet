@@ -56,20 +56,30 @@ function makeService(env: Record<string, string>) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-cloud-'))
   const dbPath = path.join(dir, 'test.db')
   env.DATABASE_PATH = dbPath
+  // Tests llaman reconcile a mano; no arrancar Interval.
+  if (env.META_WA_CTWA_RECONCILE_ENABLED == null) {
+    env.META_WA_CTWA_RECONCILE_ENABLED = 'false'
+  }
   const config = {
     get: (key: string) => env[key],
   } as ConfigService
   const db = new DatabaseService(config)
   db.onModuleInit()
   const service = new WhatsappWebhookService(config, db)
+  service.onModuleInit()
   const cleanup = () => {
+    try {
+      service.onModuleDestroy()
+    } catch {
+      // ignore
+    }
     try {
       db.onModuleDestroy()
     } catch {
       // ignore
     }
     try {
-      cleanup()
+      fs.rmSync(dir, { recursive: true, force: true })
     } catch {
       // Windows may keep WAL briefly; ignore.
     }
@@ -306,6 +316,107 @@ describe('WhatsappWebhookService', () => {
     const recon = await service.reconcilePending()
     expect(recon.linked).toBe(1)
     expect(db.getWaCloudReceipt('wamid.EARLY')?.link_status).toBe('linked')
+    cleanup()
+  })
+
+  it('webhook CTWA no encola ni envía CAPI (solo preserve CRM)', async () => {
+    const { service, cleanup } = makeService({
+      ...baseEnv,
+      SUPABASE_URL: 'https://example.supabase.co',
+      SUPABASE_SERVICE_ROLE_KEY: 'service-role-test',
+    })
+    const fetchMock = jest.spyOn(global, 'fetch' as never) as jest.SpyInstance
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => [
+          {
+            id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+            contact_id: '1',
+            kommo_id: 1,
+            tenant_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+            project_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+            whatsapp_id: '593911111111',
+            phone_normalized: '593911111111',
+          },
+        ],
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, action: 'inserted' }),
+      } as Response)
+
+    await service.processSignedWebhook(
+      metaBody({
+        wamid: 'wamid.NOCAPI',
+        from: '593911111111',
+        ctwaClid: 'CLID-NO-AUTO-CAPI',
+      }),
+    )
+    const urls = fetchMock.mock.calls.map((c) => String(c[0]))
+    expect(urls.some((u) => u.includes('/events'))).toBe(false)
+    expect(urls.some((u) => u.includes('lv_app_preserve_ctwa'))).toBe(true)
+    cleanup()
+  })
+
+  it('duplicado wamid no reinserta; ambiguo no fusiona', async () => {
+    const { service, db, cleanup } = makeService({
+      ...baseEnv,
+      SUPABASE_URL: 'https://example.supabase.co',
+      SUPABASE_SERVICE_ROLE_KEY: 'service-role-test',
+    })
+    const fetchMock = jest.spyOn(global, 'fetch' as never) as jest.SpyInstance
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => [
+        {
+          id: '11111111-1111-4111-8111-111111111111',
+          contact_id: '1',
+          kommo_id: 1,
+          tenant_id: '22222222-2222-4222-8222-222222222222',
+          project_id: '33333333-3333-4333-8333-333333333333',
+          whatsapp_id: '593900000001',
+          phone_normalized: '593900000001',
+        },
+        {
+          id: '44444444-4444-4444-8444-444444444444',
+          contact_id: '2',
+          kommo_id: 2,
+          tenant_id: '22222222-2222-4222-8222-222222222222',
+          project_id: '33333333-3333-4333-8333-333333333333',
+          whatsapp_id: '593900000001',
+          phone_normalized: '593900000001',
+        },
+      ],
+    } as Response)
+
+    const first = await service.processSignedWebhook(
+      metaBody({
+        wamid: 'wamid.AMB2',
+        from: '593900000001',
+        ctwaClid: 'CLID-AMB',
+      }),
+    )
+    expect(first.ok && first.pendingLink).toBe(1)
+    expect(db.getWaCloudReceipt('wamid.AMB2')?.link_status).toBe(
+      'pending_ambiguous',
+    )
+    expect(db.getWaCloudReceipt('wamid.AMB2')?.kommo_id).toBeNull()
+
+    const second = await service.processSignedWebhook(
+      metaBody({
+        wamid: 'wamid.AMB2',
+        from: '593900000001',
+        ctwaClid: 'CLID-AMB',
+      }),
+    )
+    expect(second.ok && second.duplicates).toBe(1)
+    expect(db.getWaCloudReceipt('wamid.AMB2')?.link_status).toBe(
+      'pending_ambiguous',
+    )
     cleanup()
   })
 })
