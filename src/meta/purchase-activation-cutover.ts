@@ -1,6 +1,12 @@
 /**
  * Corte de activación Purchase (sin I/O).
- * Elegibilidad por momento de registro/confirmación, no por sale_at backdateable.
+ *
+ * Elegibilidad exige AMBAS evidencias existentes (no inventadas):
+ * - registered_at: cuándo se registró el cierre en CRM
+ * - sale_at: fecha de confirmación comercial ya registrada en el cierre
+ *
+ * Un histórico cargado después del corte (registered_at reciente + sale_at antiguo)
+ * queda fuera. No se reescriben fechas.
  */
 export function parsePurchaseActivatedAtMs(
   raw: string | null | undefined,
@@ -11,13 +17,33 @@ export function parsePurchaseActivatedAtMs(
   return Number.isFinite(ms) ? ms : null
 }
 
-export function isPurchaseRegisteredAfterActivation(input: {
+export function parseExistingTimestampMs(
+  raw: string | number | Date | null | undefined,
+): number | null {
+  if (raw == null) return null
+  if (raw instanceof Date) {
+    const ms = raw.getTime()
+    return Number.isFinite(ms) ? ms : null
+  }
+  if (typeof raw === 'number') {
+    if (!Number.isFinite(raw)) return null
+    return raw > 1e12 ? raw : raw * 1000
+  }
+  const ms = Date.parse(String(raw))
+  return Number.isFinite(ms) ? ms : null
+}
+
+export function isPurchaseEligibleAfterActivation(input: {
   registeredAtMs: number | null | undefined
+  /** Confirmación comercial existente (p. ej. sale_at del cierre). No inventar. */
+  commercialConfirmedAtMs: number | null | undefined
   activatedAtMs: number | null | undefined
 }): boolean {
-  const reg = input.registeredAtMs
   const cut = input.activatedAtMs
   if (cut == null || !Number.isFinite(cut)) return false
+  const reg = input.registeredAtMs
+  const confirmed = input.commercialConfirmedAtMs
   if (reg == null || !Number.isFinite(reg)) return false
-  return reg >= cut
+  if (confirmed == null || !Number.isFinite(confirmed)) return false
+  return reg >= cut && confirmed >= cut
 }

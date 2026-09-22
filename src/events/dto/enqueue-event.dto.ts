@@ -170,6 +170,12 @@ export class EnqueueEventDto {
   @MaxLength(40)
   registered_at?: string;
 
+  /** Confirmación comercial existente (FE sale_at). No inventar. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  sale_at?: string;
+
   @IsOptional()
   @IsString()
   @MaxLength(64)

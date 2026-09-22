@@ -74,9 +74,11 @@ export function gateAddToWishlist(input: {
 }
 
 /**
- * Purchase (CAPI website): Meta exige value + currency ISO-4217.
- * Fuente: unit_sales_closings (sale_id). Sin currency explícita → bloqueo.
- * No temperatura / cuotas.
+ * Purchase (cierre CRM → CAPI):
+ * - action_source=system_generated (Meta: conversión automática/CRM; no website
+ *   por registrar en CRM web, ni business_messaging por lead WA).
+ * - Meta exige value + currency ISO-4217.
+ * - Fuente: unit_sales_closings (sale_id). Sin currency → bloqueo.
  */
 export function gatePurchase(input: {
   actionSource: string;
@@ -86,8 +88,12 @@ export function gatePurchase(input: {
   value?: number | null;
   currency?: string | null;
 }): MeasurementGateResult {
-  if (input.actionSource !== 'website') {
-    return { ok: false, reason: 'purchase_website_only' };
+  const source = String(input.actionSource || '').trim();
+  // Docs server-event action_source: CRM/offline no es "website".
+  // Docs CAPI for CRM platforms: system_generated.
+  // business_messaging = CTWA Messenger/IG/WA ads — no por procedencia del lead.
+  if (source !== 'system_generated') {
+    return { ok: false, reason: 'purchase_system_generated_crm_only' };
   }
   if (!String(input.saleId || '').trim()) {
     return { ok: false, reason: 'purchase_sale_id_required' };

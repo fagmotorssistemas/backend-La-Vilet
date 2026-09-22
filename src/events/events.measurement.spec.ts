@@ -50,7 +50,7 @@ describe('measurement enqueue allowlist + gates', () => {
     ).toBe(true);
     expect(
       gatePurchase({
-        actionSource: 'website',
+        actionSource: 'system_generated',
         saleId: base.event_id,
         leadId: base.event_id,
         unitId: base.event_id,
@@ -58,5 +58,15 @@ describe('measurement enqueue allowlist + gates', () => {
         currency: null,
       }).reason,
     ).toBe('purchase_currency_required_iso4217');
+    expect(
+      gatePurchase({
+        actionSource: 'website',
+        saleId: base.event_id,
+        leadId: base.event_id,
+        unitId: base.event_id,
+        value: 10,
+        currency: 'USD',
+      }).reason,
+    ).toBe('purchase_system_generated_crm_only');
   });
 });

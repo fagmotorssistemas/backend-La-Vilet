@@ -41,10 +41,10 @@ describe('measurement-event-gates', () => {
     ).toBe(false);
   });
 
-  it('Purchase bloquea sin currency / value / sale_id', () => {
+  it('Purchase exige system_generated + currency / value / sale_id', () => {
     expect(
       gatePurchase({
-        actionSource: 'website',
+        actionSource: 'system_generated',
         saleId: 's1',
         leadId: 'l1',
         unitId: 'u1',
@@ -59,12 +59,22 @@ describe('measurement-event-gates', () => {
         leadId: 'l1',
         unitId: 'u1',
         value: 100,
+        currency: 'USD',
+      }).reason,
+    ).toBe('purchase_system_generated_crm_only');
+    expect(
+      gatePurchase({
+        actionSource: 'system_generated',
+        saleId: 's1',
+        leadId: 'l1',
+        unitId: 'u1',
+        value: 100,
         currency: null,
       }).reason,
     ).toBe('purchase_currency_required_iso4217');
     expect(
       gatePurchase({
-        actionSource: 'website',
+        actionSource: 'system_generated',
         saleId: 's1',
         leadId: 'l1',
         unitId: 'u1',

@@ -16,7 +16,8 @@ import {
   saleIdFromPurchaseRow,
 } from '../meta/purchase-annulment-gate';
 import {
-  isPurchaseRegisteredAfterActivation,
+  isPurchaseEligibleAfterActivation,
+  parseExistingTimestampMs,
   parsePurchaseActivatedAtMs,
 } from '../meta/purchase-activation-cutover';
 import { decideWaLeadSubmittedConsentGate } from '../meta/wa-lead-submitted-consent-gate';
@@ -361,8 +362,8 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Corte: registered_at en payload (FE) o created_at Nest.
-   * No usa sale_at (backdateable).
+   * Corte: registered_at (CRM) Y sale_at (confirmación comercial existente).
+   * Ambos deben ser >= META_PURCHASE_ACTIVATED_AT. No inventa fechas.
    */
   private isPurchaseWithinActivationCutover(row: {
     created_at: string;
@@ -371,6 +372,7 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
     const cut = this.purchaseActivatedAtMs();
     if (cut == null) return false;
     let registeredMs: number | null = null;
+    let saleAtMs: number | null = null;
     try {
       const parsed = JSON.parse(row.payload_redacted || '{}') as Record<
         string,
@@ -380,23 +382,27 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
         parsed.details && typeof parsed.details === 'object'
           ? (parsed.details as Record<string, unknown>)
           : null;
-      const raw =
+      registeredMs = parseExistingTimestampMs(
         (typeof parsed.registered_at === 'string' && parsed.registered_at) ||
-        (typeof details?.registered_at === 'string' && details.registered_at) ||
-        null;
-      if (raw) {
-        const ms = Date.parse(raw);
-        if (Number.isFinite(ms)) registeredMs = ms;
-      }
+          (typeof details?.registered_at === 'string' &&
+            details.registered_at) ||
+          null,
+      );
+      saleAtMs = parseExistingTimestampMs(
+        (typeof parsed.sale_at === 'string' && parsed.sale_at) ||
+          (typeof details?.sale_at === 'string' && details.sale_at) ||
+          null,
+      );
     } catch {
       registeredMs = null;
+      saleAtMs = null;
     }
     if (registeredMs == null) {
-      const ms = Date.parse(row.created_at);
-      registeredMs = Number.isFinite(ms) ? ms : null;
+      registeredMs = parseExistingTimestampMs(row.created_at);
     }
-    return isPurchaseRegisteredAfterActivation({
+    return isPurchaseEligibleAfterActivation({
       registeredAtMs: registeredMs,
+      commercialConfirmedAtMs: saleAtMs,
       activatedAtMs: cut,
     });
   }

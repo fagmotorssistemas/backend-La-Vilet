@@ -12,7 +12,8 @@ import { MetaCapiService } from '../meta/meta-capi.service';
 import { decideWaLeadSubmittedConsentGate } from '../meta/wa-lead-submitted-consent-gate';
 import { decidePurchaseAnnulment } from '../meta/purchase-annulment-gate';
 import {
-  isPurchaseRegisteredAfterActivation,
+  isPurchaseEligibleAfterActivation,
+  parseExistingTimestampMs,
   parsePurchaseActivatedAtMs,
 } from '../meta/purchase-activation-cutover';
 
@@ -344,18 +345,19 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
       payload.details && typeof payload.details === 'object'
         ? (payload.details as Record<string, unknown>)
         : null;
-    const raw =
+    const registeredMs = parseExistingTimestampMs(
       (typeof payload.registered_at === 'string' && payload.registered_at) ||
-      (typeof details?.registered_at === 'string' && details.registered_at) ||
-      null;
-    let registeredMs: number | null = null;
-    if (raw) {
-      const ms = Date.parse(raw);
-      if (Number.isFinite(ms)) registeredMs = ms;
-    }
-    // Sin registered_at: no drenar (evita históricos sin corte).
-    return isPurchaseRegisteredAfterActivation({
+        (typeof details?.registered_at === 'string' && details.registered_at) ||
+        null,
+    );
+    const saleAtMs = parseExistingTimestampMs(
+      (typeof payload.sale_at === 'string' && payload.sale_at) ||
+        (typeof details?.sale_at === 'string' && details.sale_at) ||
+        null,
+    );
+    return isPurchaseEligibleAfterActivation({
       registeredAtMs: registeredMs,
+      commercialConfirmedAtMs: saleAtMs,
       activatedAtMs: cut,
     });
   }
