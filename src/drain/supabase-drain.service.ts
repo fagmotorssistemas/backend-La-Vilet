@@ -679,7 +679,7 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
     return rows[0]?.meta_ads_consent === false;
   }
 
-  /** Solo LeadSubmitted: true estricto + scope; error → hold. */
+  /** Solo LeadSubmitted: false cancela; null/ausente permiten; error → hold. */
   private async leadSubmittedConsentGate(
     row: SupabaseOutboxRow,
     payload: Record<string, unknown>,
@@ -818,7 +818,7 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
 
     const payload = row.payload || {};
 
-    // LeadSubmitted: exige consent exactamente true + scope; error → skip (pending).
+    // LeadSubmitted: solo false cancela; null/ausente permiten; error → skip (pending).
     if (row.event_name === 'LeadSubmitted') {
       const gate = await this.leadSubmittedConsentGate(row, payload);
       if (gate.action === 'cancel_revoked') {

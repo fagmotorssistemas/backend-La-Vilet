@@ -12,7 +12,7 @@ describe('decideWaLeadSubmittedConsentGate', () => {
     eventContactId: '4429474',
   };
 
-  it('solo true autoriza el envío', () => {
+  it('true autoriza el envío', () => {
     expect(decideWaLeadSubmittedConsentGate(scoped).action).toBe('allow_send');
   });
 
@@ -25,19 +25,19 @@ describe('decideWaLeadSubmittedConsentGate', () => {
     expect(d.reason).toBe('ads_consent_false');
   });
 
-  it('null / undefined dejan pending sin perder', () => {
+  it('null / undefined permiten envío (configuración operativa)', () => {
     expect(
       decideWaLeadSubmittedConsentGate({
         ...scoped,
         metaAdsConsent: null,
       }).action,
-    ).toBe('hold_pending');
+    ).toBe('allow_send');
     expect(
       decideWaLeadSubmittedConsentGate({
         ...scoped,
         metaAdsConsent: undefined,
       }).action,
-    ).toBe('hold_pending');
+    ).toBe('allow_send');
   });
 
   it('lead ausente o error de consulta → hold_pending', () => {

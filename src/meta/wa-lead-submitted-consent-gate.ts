@@ -1,7 +1,8 @@
 /**
  * Gate de consentimiento para LeadSubmitted (WhatsApp BM) antes del envío efectivo.
  * Fuente autorizada: fila `leads` en Supabase (meta_ads_consent).
- * Solo `=== true` autoriza. false / null / ausente / error / scope inválido → no envío.
+ * Configuración operativa: solo `=== false` cancela (rechazo/revocación).
+ * null / ausente permiten envío. No escribe ni inventa consentimiento.
  * Otros eventos CAPI no usan este gate.
  */
 
@@ -44,9 +45,9 @@ function scopeMismatch(
 }
 
 /**
- * Exige consentimiento vigente exactamente true + alcance tenant/proyecto/contacto.
  * - false → cancel (revocado)
- * - null, ausente, error de consulta, sin contacto, scope mismatch → hold (pending; no perder)
+ * - true / null / undefined → allow_send (si scope OK)
+ * - error de consulta, sin contacto, lead ausente, scope mismatch → hold
  */
 export function decideWaLeadSubmittedConsentGate(
   input: WaLeadSubmittedConsentSnapshot,
@@ -80,10 +81,11 @@ export function decideWaLeadSubmittedConsentGate(
     return { action: 'cancel_revoked', reason: 'ads_consent_false' }
   }
 
-  if (input.metaAdsConsent === true) {
-    return { action: 'allow_send', reason: 'ads_consent_true' }
+  return {
+    action: 'allow_send',
+    reason:
+      input.metaAdsConsent === true
+        ? 'ads_consent_true'
+        : 'ads_consent_absent_allowed',
   }
-
-  // null / undefined
-  return { action: 'hold_pending', reason: 'ads_consent_not_true' }
 }

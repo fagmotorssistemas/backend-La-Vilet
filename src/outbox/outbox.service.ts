@@ -99,7 +99,7 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
           continue;
         }
 
-        // LeadSubmitted: consentimiento exactamente true (fuente leads) + scope.
+        // LeadSubmitted: solo false cancela; null/ausente permiten (fuente leads) + scope.
         // Otros eventos: solo cancelan si consent === false (comportamiento previo).
         if (fresh.event_name === 'LeadSubmitted') {
           const gate = await this.resolveLeadSubmittedConsentGate(fresh);

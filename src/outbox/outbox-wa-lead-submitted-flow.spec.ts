@@ -235,7 +235,7 @@ describe('OutboxService — LeadSubmitted Nest flow (Graph simulado)', () => {
     expect(graphCalls).toHaveLength(0);
   });
 
-  it('consent null/ausente → hold pending sin Graph (no conversión automática)', async () => {
+  it('consent null/ausente → permite Graph (configuración operativa)', async () => {
     leadConsent = null;
     insertLs();
     await makeOutbox(true).tick();
@@ -245,9 +245,9 @@ describe('OutboxService — LeadSubmitted Nest flow (Graph simulado)', () => {
         `SELECT status, last_error FROM outbox_events WHERE event_name = 'LeadSubmitted'`,
       )
       .get() as { status: string; last_error: string | null };
-    expect(row.status).toBe('pending');
-    expect(String(row.last_error || '')).toMatch(/ads_consent/);
-    expect(graphCalls).toHaveLength(0);
+    expect(row.status).toBe('sent');
+    expect(graphCalls).toHaveLength(1);
+    expect(graphCalls[0].eventName).toBe('LeadSubmitted');
   });
 
   it('tenant mismatch → hold pending sin Graph', async () => {
