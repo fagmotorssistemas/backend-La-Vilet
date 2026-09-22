@@ -342,6 +342,7 @@ export class EventsService {
         lv_internal_subtype: subtype,
         unit_id: unitId,
         sale_id: saleId,
+        registered_at: String(dto.registered_at || '').trim() || null,
       },
       graph_payload: built.payload,
       dataset_id: datasetForRow,

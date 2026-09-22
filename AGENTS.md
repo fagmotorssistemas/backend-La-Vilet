@@ -1,9 +1,9 @@
 # AGENTS.md — lavilet-meta-capi
 
 1. Dataset canónico: `923439043758658` (La Vilet Web).
-2. Eventos: `ViewContent`, `Lead`, `Schedule`, `LeadSubmitted`, `AddToWishlist`.
-   `Purchase` tipado pero `META_PURCHASE_DELIVERY_ENABLED=false` por defecto.
-   No Purchase por temperatura ni por cuota.
+2. Eventos: `ViewContent`, `Lead`, `Schedule`, `LeadSubmitted`, `AddToWishlist`, `Purchase`.
+   Purchase: `META_PURCHASE_DELIVERY_ENABLED` + `META_PURCHASE_ACTIVATED_AT` (ISO).
+   Solo ventas registradas tras el corte; no temperatura/cuota; canal website (dataset web).
 3. Despliegue: DigitalOcean con Docker + volumen `/data`. No asumir secretos en Vercel.
 4. Nunca loguear ni commitear tokens ni PII en claro.
 5. `META_MODE=live` incompatible con `META_TEST_EVENT_CODE`.

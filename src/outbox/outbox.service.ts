@@ -15,6 +15,10 @@ import {
   decidePurchaseAnnulment,
   saleIdFromPurchaseRow,
 } from '../meta/purchase-annulment-gate';
+import {
+  isPurchaseRegisteredAfterActivation,
+  parsePurchaseActivatedAtMs,
+} from '../meta/purchase-activation-cutover';
 import { decideWaLeadSubmittedConsentGate } from '../meta/wa-lead-submitted-consent-gate';
 
 @Injectable()
@@ -170,6 +174,16 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
         }
 
         if (fresh.event_name === 'Purchase' && purchaseDeliveryOn) {
+          if (!this.isPurchaseWithinActivationCutover(fresh)) {
+            this.db.releaseProcessingToPending(
+              row.id,
+              'purchase_before_activation_cutover',
+            );
+            this.logger.log(
+              `outbox hold purchase_before_activation_cutover id=${row.id}`,
+            );
+            continue;
+          }
           const gate = await this.resolvePurchaseAnnulmentGate(fresh);
           if (gate.action === 'cancel') {
             this.db.cancelByEventIds([fresh.event_id], gate.reason);
@@ -338,6 +352,53 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
       .trim()
       .toLowerCase();
     return raw === 'true' || raw === '1';
+  }
+
+  private purchaseActivatedAtMs(): number | null {
+    return parsePurchaseActivatedAtMs(
+      this.config.get<string>('META_PURCHASE_ACTIVATED_AT'),
+    );
+  }
+
+  /**
+   * Corte: registered_at en payload (FE) o created_at Nest.
+   * No usa sale_at (backdateable).
+   */
+  private isPurchaseWithinActivationCutover(row: {
+    created_at: string;
+    payload_redacted: string | null;
+  }): boolean {
+    const cut = this.purchaseActivatedAtMs();
+    if (cut == null) return false;
+    let registeredMs: number | null = null;
+    try {
+      const parsed = JSON.parse(row.payload_redacted || '{}') as Record<
+        string,
+        unknown
+      >;
+      const details =
+        parsed.details && typeof parsed.details === 'object'
+          ? (parsed.details as Record<string, unknown>)
+          : null;
+      const raw =
+        (typeof parsed.registered_at === 'string' && parsed.registered_at) ||
+        (typeof details?.registered_at === 'string' && details.registered_at) ||
+        null;
+      if (raw) {
+        const ms = Date.parse(raw);
+        if (Number.isFinite(ms)) registeredMs = ms;
+      }
+    } catch {
+      registeredMs = null;
+    }
+    if (registeredMs == null) {
+      const ms = Date.parse(row.created_at);
+      registeredMs = Number.isFinite(ms) ? ms : null;
+    }
+    return isPurchaseRegisteredAfterActivation({
+      registeredAtMs: registeredMs,
+      activatedAtMs: cut,
+    });
   }
 
   /**

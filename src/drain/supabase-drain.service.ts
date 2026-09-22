@@ -11,6 +11,10 @@ import { EventsService } from '../events/events.service';
 import { MetaCapiService } from '../meta/meta-capi.service';
 import { decideWaLeadSubmittedConsentGate } from '../meta/wa-lead-submitted-consent-gate';
 import { decidePurchaseAnnulment } from '../meta/purchase-annulment-gate';
+import {
+  isPurchaseRegisteredAfterActivation,
+  parsePurchaseActivatedAtMs,
+} from '../meta/purchase-activation-cutover';
 
 type SupabaseOutboxRow = {
   id: string;
@@ -170,7 +174,7 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
           );
           continue;
         }
-        // Purchase: tipado pero envío off por defecto.
+        // Purchase: tipado; envío solo con flag + corte de activación.
         if (
           row.event_name === 'Purchase' &&
           !this.isPurchaseDeliveryEnabled()
@@ -178,6 +182,17 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
           skipped += 1;
           this.logger.log(
             `drain skip purchase_delivery_inactive event_id=${row.event_id}`,
+          );
+          continue;
+        }
+        if (
+          row.event_name === 'Purchase' &&
+          this.isPurchaseDeliveryEnabled() &&
+          !this.isPurchaseRowWithinCutover(row)
+        ) {
+          skipped += 1;
+          this.logger.log(
+            `drain skip purchase_before_activation_cutover event_id=${row.event_id}`,
           );
           continue;
         }
@@ -318,6 +333,31 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
       .trim()
       .toLowerCase();
     return raw === 'true' || raw === '1';
+  }
+
+  private isPurchaseRowWithinCutover(row: SupabaseOutboxRow): boolean {
+    const cut = parsePurchaseActivatedAtMs(
+      this.config.get<string>('META_PURCHASE_ACTIVATED_AT'),
+    );
+    const payload = row.payload || {};
+    const details =
+      payload.details && typeof payload.details === 'object'
+        ? (payload.details as Record<string, unknown>)
+        : null;
+    const raw =
+      (typeof payload.registered_at === 'string' && payload.registered_at) ||
+      (typeof details?.registered_at === 'string' && details.registered_at) ||
+      null;
+    let registeredMs: number | null = null;
+    if (raw) {
+      const ms = Date.parse(raw);
+      if (Number.isFinite(ms)) registeredMs = ms;
+    }
+    // Sin registered_at: no drenar (evita históricos sin corte).
+    return isPurchaseRegisteredAfterActivation({
+      registeredAtMs: registeredMs,
+      activatedAtMs: cut,
+    });
   }
 
   /**
@@ -1017,6 +1057,10 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
           : undefined,
       unit_id: typeof payload.unit_id === 'string' ? payload.unit_id : undefined,
       sale_id: typeof payload.sale_id === 'string' ? payload.sale_id : undefined,
+      registered_at:
+        typeof payload.registered_at === 'string'
+          ? payload.registered_at
+          : undefined,
       value:
         typeof payload.value === 'number'
           ? payload.value

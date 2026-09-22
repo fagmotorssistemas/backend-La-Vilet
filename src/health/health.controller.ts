@@ -35,6 +35,16 @@ export class HealthController {
       delivery_enabled: gate.ok,
       delivery_reason: gate.ok ? null : gate.reason,
       core_setup_conservative: this.meta.coreSetupConservative,
+      purchase_delivery_enabled:
+        String(
+          this.config.get<string>('META_PURCHASE_DELIVERY_ENABLED') || '',
+        )
+          .trim()
+          .toLowerCase() === 'true',
+      purchase_activated_at:
+        String(
+          this.config.get<string>('META_PURCHASE_ACTIVATED_AT') || '',
+        ).trim() || null,
       persistence: {
         database_path: this.db.databasePath,
       },
