@@ -11,6 +11,13 @@ import {
 } from '../common/utils/phone';
 import type { EnqueueEventDto } from './dto/enqueue-event.dto';
 import { evaluateMetaAcceptanceEvidence } from '../meta/meta-acceptance';
+import {
+  gateAddToWishlist,
+  gatePurchase,
+  gateViewContent,
+  normalizeCurrency,
+  resolveViewContentContentIds,
+} from '../meta/measurement-event-gates';
 
 export type NestEventLookupResponse = {
   ok: true;
@@ -145,6 +152,15 @@ export class EventsService {
           'business_messaging_schedule_not_supported_by_meta',
         );
       }
+      if (
+        dto.event_name === 'AddToWishlist' ||
+        dto.event_name === 'Purchase' ||
+        dto.event_name === 'ViewContent'
+      ) {
+        throw new BadRequestException(
+          'business_messaging_website_events_not_allowed',
+        );
+      }
       const dataset = String(dto.messaging_dataset_id || '').trim();
       const ctwa = String(dto.ctwa_clid || '').trim();
       const waba = String(dto.whatsapp_business_account_id || '').trim();
@@ -166,7 +182,48 @@ export class EventsService {
       }
     }
 
+    const subtype = String(dto.lv_internal_subtype || '').trim() || null;
+    const unitId = String(dto.unit_id || '').trim() || null;
+    const saleId = String(dto.sale_id || '').trim() || null;
     const leadId = dto.lead_id || dto.external_id || null;
+
+    if (dto.event_name === 'ViewContent') {
+      const gate = gateViewContent({
+        subtype,
+        unitId,
+        contentIds: dto.content_ids,
+      });
+      if (!gate.ok) throw new BadRequestException(gate.reason);
+    }
+
+    if (dto.event_name === 'AddToWishlist') {
+      const gate = gateAddToWishlist({
+        actionSource: dto.action_source,
+        leadId,
+        unitId,
+      });
+      if (!gate.ok) throw new BadRequestException(gate.reason);
+    }
+
+    let purchaseCurrency: string | null = null;
+    let purchaseValue: number | null = null;
+    if (dto.event_name === 'Purchase') {
+      purchaseCurrency = normalizeCurrency(dto.currency);
+      purchaseValue =
+        dto.value != null && Number.isFinite(Number(dto.value))
+          ? Number(dto.value)
+          : null;
+      const gate = gatePurchase({
+        actionSource: dto.action_source,
+        saleId,
+        leadId,
+        unitId,
+        value: purchaseValue,
+        currency: purchaseCurrency,
+      });
+      if (!gate.ok) throw new BadRequestException(gate.reason);
+    }
+
     const visitorKey = dto.visitor_key || null;
 
     const email = isLikelyArtificialEmail(dto.email) ? undefined : dto.email;
@@ -191,6 +248,15 @@ export class EventsService {
 
     const fbc = this.meta.buildFbc(dto.fbclid, dto.fbc);
 
+    const contentIds =
+      dto.event_name === 'ViewContent'
+        ? resolveViewContentContentIds({
+            subtype,
+            unitId,
+            contentIds: dto.content_ids,
+          })
+        : dto.content_ids;
+
     const built = this.meta.buildGraphPayload({
       eventName: dto.event_name,
       eventId: dto.event_id,
@@ -211,9 +277,11 @@ export class EventsService {
       fbc,
       clientIpAddress: dto.client_ip_address,
       clientUserAgent: dto.client_user_agent,
-      contentIds: dto.content_ids,
+      contentIds,
       contentName: dto.content_name,
       contentCategory: dto.content_category,
+      value: purchaseValue,
+      currency: purchaseCurrency,
       messagingChannel:
         dto.messaging_channel === 'whatsapp' ? 'whatsapp' : undefined,
       ctwaClid: dto.ctwa_clid,
@@ -242,6 +310,9 @@ export class EventsService {
         project_id: dto.project_id || null,
         contact_id: dto.contact_id || null,
         lead_id: leadId,
+        lv_internal_subtype: subtype,
+        unit_id: unitId,
+        sale_id: saleId,
       },
       graph_payload: built.payload,
       dataset_id: datasetForRow,

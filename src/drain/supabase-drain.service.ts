@@ -15,7 +15,13 @@ type SupabaseOutboxRow = {
   id: string;
   idempotency_key: string;
   event_id: string;
-  event_name: 'ViewContent' | 'Lead' | 'Schedule' | 'LeadSubmitted';
+  event_name:
+    | 'ViewContent'
+    | 'Lead'
+    | 'Schedule'
+    | 'LeadSubmitted'
+    | 'AddToWishlist'
+    | 'Purchase';
   event_time: number;
   payload: Record<string, unknown>;
   status: string;
@@ -163,6 +169,19 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
           );
           continue;
         }
+        // Purchase: tipado pero envío off por defecto.
+        if (
+          row.event_name === 'Purchase' &&
+          !this.isPurchaseDeliveryEnabled()
+        ) {
+          skipped += 1;
+          this.logger.log(
+            `drain skip purchase_delivery_inactive event_id=${row.event_id}`,
+          );
+          continue;
+        }
+        // review_hold histórico (wishlist/purchase captura previa): no drenar.
+        // Solo pending llega aquí; defensa ya cubierta arriba.
         const outcome = await this.forwardRow(row);
         if (outcome === 'forwarded') forwarded += 1;
         else if (outcome === 'cancelled') cancelled += 1;
@@ -285,6 +304,15 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
   private isWaLeadSubmittedDeliveryEnabled() {
     const raw = String(
       this.config.get<string>('META_WA_LEAD_SUBMITTED_DELIVERY_ENABLED') || '',
+    )
+      .trim()
+      .toLowerCase();
+    return raw === 'true' || raw === '1';
+  }
+
+  private isPurchaseDeliveryEnabled() {
+    const raw = String(
+      this.config.get<string>('META_PURCHASE_DELIVERY_ENABLED') || '',
     )
       .trim()
       .toLowerCase();
@@ -916,6 +944,21 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
         typeof payload.content_category === 'string'
           ? payload.content_category
           : undefined,
+      lv_internal_subtype:
+        typeof payload.lv_internal_subtype === 'string'
+          ? payload.lv_internal_subtype
+          : undefined,
+      unit_id: typeof payload.unit_id === 'string' ? payload.unit_id : undefined,
+      sale_id: typeof payload.sale_id === 'string' ? payload.sale_id : undefined,
+      value:
+        typeof payload.value === 'number'
+          ? payload.value
+          : typeof payload.value === 'string' &&
+              Number.isFinite(Number(payload.value))
+            ? Number(payload.value)
+            : undefined,
+      currency:
+        typeof payload.currency === 'string' ? payload.currency : undefined,
       delivery_lane: row.delivery_lane,
       ads_consent: true,
       messaging_channel:

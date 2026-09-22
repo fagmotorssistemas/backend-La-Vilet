@@ -13,14 +13,24 @@ import {
 } from './core-setup-conservative';
 
 export type MetaMode = 'disabled' | 'test' | 'live';
-export type MetaEventName = 'ViewContent' | 'Lead' | 'Schedule' | 'LeadSubmitted';
+export type MetaEventName =
+  | 'ViewContent'
+  | 'Lead'
+  | 'Schedule'
+  | 'LeadSubmitted'
+  | 'AddToWishlist'
+  | 'Purchase';
 
 export type BuildGraphInput = {
   eventName: MetaEventName;
   eventId?: string;
   eventTime?: number;
   actionSource:
-    'website' | 'system_generated' | 'business_messaging' | 'other' | 'chat';
+    | 'website'
+    | 'system_generated'
+    | 'business_messaging'
+    | 'other'
+    | 'chat';
   eventSourceUrl?: string | null;
   match?: MatchInput;
   fbp?: string | null;
@@ -30,6 +40,9 @@ export type BuildGraphInput = {
   contentIds?: string[];
   contentName?: string | null;
   contentCategory?: string | null;
+  /** Purchase: Meta exige value+currency en custom_data. */
+  value?: number | null;
+  currency?: string | null;
   messagingChannel?: 'whatsapp';
   ctwaClid?: string | null;
   /** user_data.whatsapp_business_account_id — distinto del dataset Graph. */
@@ -162,13 +175,42 @@ export class MetaCapiService {
 
   /**
    * Revalida reglas Core Setup sobre un body Graph ya persistido (cola antigua).
-   * Idempotente; no toca Meta.
+   * Idempotente; no toca Meta. Conserva value/currency de Purchase (exigidos por Meta).
    */
   applyCoreSetupBeforeGraphSend(
     body: Record<string, unknown>,
   ): Record<string, unknown> {
     if (!this.coreSetupConservative) return body;
-    return applyCoreSetupConservativeToGraphBody(body);
+    const events = Array.isArray(body.data)
+      ? (body.data as Array<Record<string, unknown>>)
+      : [];
+    const purchaseKeep: Array<{
+      value?: unknown;
+      currency?: unknown;
+    } | null> = events.map((ev) => {
+      if (String(ev?.event_name || '') !== 'Purchase') return null;
+      const cd =
+        ev.custom_data && typeof ev.custom_data === 'object'
+          ? (ev.custom_data as Record<string, unknown>)
+          : {};
+      return {
+        value: cd.value,
+        currency: cd.currency,
+      };
+    });
+    const next = applyCoreSetupConservativeToGraphBody(body);
+    const nextEvents = Array.isArray(next.data)
+      ? (next.data as Array<Record<string, unknown>>)
+      : [];
+    for (let i = 0; i < nextEvents.length; i += 1) {
+      const keep = purchaseKeep[i];
+      if (!keep) continue;
+      const kept: Record<string, unknown> = {};
+      if (keep.value != null) kept.value = keep.value;
+      if (keep.currency != null) kept.currency = keep.currency;
+      if (Object.keys(kept).length) nextEvents[i].custom_data = kept;
+    }
+    return next;
   }
 
   buildFbc(fbclid?: string | null, existingFbc?: string | null): string | null {
@@ -221,15 +263,22 @@ export class MetaCapiService {
     }
 
     const conservative = this.coreSetupConservative;
+    const isPurchase = input.eventName === 'Purchase';
+    const custom: Record<string, unknown> = {};
     if (!conservative) {
-      const custom: Record<string, unknown> = {};
       if (input.contentIds?.length) custom.content_ids = input.contentIds;
       if (input.contentName) custom.content_name = input.contentName;
       if (input.contentCategory) custom.content_category = input.contentCategory;
-      // Sin value/currency artificial; sin content_type inventado.
-      // ctwa_clid NO va aquí (solo user_data en business_messaging).
-      if (Object.keys(custom).length) event.custom_data = custom;
     }
+    // Purchase: Meta docs — value + currency required. Conservar aunque Core Setup
+    // strippee content_*; nunca inventar currency/value aquí (validados en enqueue).
+    if (isPurchase) {
+      if (input.value != null && Number.isFinite(Number(input.value))) {
+        custom.value = Number(input.value);
+      }
+      if (input.currency) custom.currency = String(input.currency).trim();
+    }
+    if (Object.keys(custom).length) event.custom_data = custom;
 
     let payload: Record<string, unknown> = { data: [event] };
     if (this.mode === 'test' && this.testEventCode) {
@@ -237,6 +286,16 @@ export class MetaCapiService {
     }
     if (conservative) {
       payload = applyCoreSetupConservativeToGraphBody(payload);
+      // Reinyectar value/currency Purchase tras strip de custom_data genérico.
+      if (isPurchase && (custom.value != null || custom.currency)) {
+        const events = payload.data as Array<Record<string, unknown>>;
+        if (Array.isArray(events) && events[0]) {
+          const kept: Record<string, unknown> = {};
+          if (custom.value != null) kept.value = custom.value;
+          if (custom.currency) kept.currency = custom.currency;
+          events[0].custom_data = kept;
+        }
+      }
     }
 
     const redacted = {
@@ -260,6 +319,8 @@ export class MetaCapiService {
       content_ids: conservative ? null : input.contentIds || null,
       content_name: conservative ? null : input.contentName || null,
       content_category: conservative ? null : input.contentCategory || null,
+      value: isPurchase ? input.value ?? null : null,
+      currency: isPurchase ? input.currency ?? null : null,
       core_setup_conservative: conservative,
       test_mode: this.mode === 'test',
     };

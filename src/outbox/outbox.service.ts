@@ -77,10 +77,12 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
       const lane = this.meta.mode === 'test' ? 'test' : 'live';
       const scheduleDeliveryOn = this.isScheduleDeliveryEnabled();
       const waLeadSubmittedDeliveryOn = this.isWaLeadSubmittedDeliveryEnabled();
-      // Delivery OFF: no claim Schedule / LeadSubmitted → no se envían ni se pierden; Lead/VC siguen.
+      const purchaseDeliveryOn = this.isPurchaseDeliveryEnabled();
+      // Delivery OFF: no claim Schedule / LeadSubmitted / Purchase → no se envían ni se pierden.
       const claimed = this.db.claimPending(batch, lane, {
         excludeSchedule: !scheduleDeliveryOn,
         excludeLeadSubmitted: !waLeadSubmittedDeliveryOn,
+        excludePurchase: !purchaseDeliveryOn,
       });
 
       for (const row of claimed) {
@@ -148,6 +150,17 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
           );
           this.logger.log(
             `outbox skip wa_lead_submitted_delivery_inactive id=${row.id} (conservado pending)`,
+          );
+          continue;
+        }
+
+        if (fresh.event_name === 'Purchase' && !purchaseDeliveryOn) {
+          this.db.releaseProcessingToPending(
+            row.id,
+            'purchase_delivery_inactive',
+          );
+          this.logger.log(
+            `outbox skip purchase_delivery_inactive id=${row.id} (conservado pending)`,
           );
           continue;
         }
@@ -281,6 +294,16 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
   private isWaLeadSubmittedDeliveryEnabled() {
     const raw = String(
       this.config.get<string>('META_WA_LEAD_SUBMITTED_DELIVERY_ENABLED') || '',
+    )
+      .trim()
+      .toLowerCase();
+    return raw === 'true' || raw === '1';
+  }
+
+  /** Purchase tipado; envío Graph apagado por defecto hasta activación explícita. */
+  private isPurchaseDeliveryEnabled() {
+    const raw = String(
+      this.config.get<string>('META_PURCHASE_DELIVERY_ENABLED') || '',
     )
       .trim()
       .toLowerCase();

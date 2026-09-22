@@ -1,0 +1,128 @@
+/**
+ * Validación de eventos de medición website (ViewContent subtypes, Wishlist, Purchase).
+ * Sin I/O. No inventa unit_id ni currency.
+ */
+
+export type LvInternalSubtype =
+  | 'showroom_general'
+  | 'detalle_unidad'
+  | 'favorito'
+  | 'solicitud'
+  | 'cita'
+  | 'compra'
+  | string;
+
+export type MeasurementGateResult =
+  | { ok: true }
+  | { ok: false; reason: string };
+
+const ISO4217 = /^[A-Z]{3}$/;
+
+export function normalizeCurrency(
+  raw: string | null | undefined,
+): string | null {
+  const c = String(raw || '')
+    .trim()
+    .toUpperCase();
+  if (!c) return null;
+  if (!ISO4217.test(c)) return null;
+  return c;
+}
+
+/**
+ * ViewContent:
+ * - showroom_general: no exige unit; no inventar content_ids
+ * - detalle_unidad: unit_id recomendado; content_ids solo si vienen del productor
+ */
+export function gateViewContent(input: {
+  subtype?: string | null;
+  unitId?: string | null;
+  contentIds?: string[] | null;
+}): MeasurementGateResult {
+  const subtype = String(input.subtype || '').trim();
+  if (subtype === 'showroom_general') {
+    // Unidad inventada / content_ids forzados: rechazar si el productor los manda como único id inventado.
+    // Permitimos content_ids vacío/ausente. Si envían content_ids, no es error (FE conservative no los manda).
+    return { ok: true };
+  }
+  if (subtype === 'detalle_unidad') {
+    const unit = String(input.unitId || '').trim();
+    if (!unit) {
+      return { ok: false, reason: 'detalle_unidad_requires_unit_id' };
+    }
+    return { ok: true };
+  }
+  // Subtipo ausente: compat hacia atrás (VC legacy sin subtype).
+  return { ok: true };
+}
+
+export function gateAddToWishlist(input: {
+  actionSource: string;
+  leadId?: string | null;
+  unitId?: string | null;
+}): MeasurementGateResult {
+  if (input.actionSource !== 'website') {
+    return { ok: false, reason: 'wishlist_website_only' };
+  }
+  if (!String(input.leadId || '').trim()) {
+    return { ok: false, reason: 'wishlist_lead_id_required' };
+  }
+  if (!String(input.unitId || '').trim()) {
+    return { ok: false, reason: 'wishlist_unit_id_required' };
+  }
+  return { ok: true };
+}
+
+/**
+ * Purchase (CAPI website): Meta exige value + currency ISO-4217.
+ * Fuente: unit_sales_closings (sale_id). Sin currency explícita → bloqueo.
+ * No temperatura / cuotas.
+ */
+export function gatePurchase(input: {
+  actionSource: string;
+  saleId?: string | null;
+  leadId?: string | null;
+  unitId?: string | null;
+  value?: number | null;
+  currency?: string | null;
+}): MeasurementGateResult {
+  if (input.actionSource !== 'website') {
+    return { ok: false, reason: 'purchase_website_only' };
+  }
+  if (!String(input.saleId || '').trim()) {
+    return { ok: false, reason: 'purchase_sale_id_required' };
+  }
+  if (!String(input.leadId || '').trim()) {
+    return { ok: false, reason: 'purchase_lead_id_required' };
+  }
+  if (!String(input.unitId || '').trim()) {
+    return { ok: false, reason: 'purchase_unit_id_required' };
+  }
+  if (
+    input.value == null ||
+    !Number.isFinite(Number(input.value)) ||
+    Number(input.value) <= 0
+  ) {
+    return { ok: false, reason: 'purchase_value_required' };
+  }
+  const currency = normalizeCurrency(input.currency);
+  if (!currency) {
+    return { ok: false, reason: 'purchase_currency_required_iso4217' };
+  }
+  return { ok: true };
+}
+
+/** content_ids para showroom_general: nunca inventar desde unit_id. */
+export function resolveViewContentContentIds(input: {
+  subtype?: string | null;
+  unitId?: string | null;
+  contentIds?: string[] | null;
+}): string[] | undefined {
+  const subtype = String(input.subtype || '').trim();
+  if (subtype === 'showroom_general') {
+    // Solo lo que el productor envió explícitamente (FE conservative → vacío).
+    return input.contentIds?.length ? [...input.contentIds] : undefined;
+  }
+  if (input.contentIds?.length) return [...input.contentIds];
+  return undefined;
+}
