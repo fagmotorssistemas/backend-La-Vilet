@@ -804,6 +804,17 @@ export class SqliteOutboxStore {
       .get(id) as OutboxRow | undefined;
   }
 
+  /** Última fila por event_id (trazabilidad CRM; no inventa aceptación). */
+  getLatestByEventId(eventId: string): OutboxRow | undefined {
+    const id = String(eventId || '').trim();
+    if (!id) return undefined;
+    return this.db
+      .prepare(
+        `SELECT * FROM outbox_events WHERE event_id = ? ORDER BY id DESC LIMIT 1`,
+      )
+      .get(id) as OutboxRow | undefined;
+  }
+
   markSent(id: number, metaResponseRedacted: unknown): boolean {
     const result = this.db
       .prepare(

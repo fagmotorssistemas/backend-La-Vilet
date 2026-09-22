@@ -100,6 +100,10 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     return this.store.getOutboxById(id);
   }
 
+  getLatestByEventId(eventId: string) {
+    return this.store.getLatestByEventId(eventId);
+  }
+
   cancelProcessingIfRevoked(id: number): boolean {
     return this.store.cancelProcessingIfRevoked(id);
   }

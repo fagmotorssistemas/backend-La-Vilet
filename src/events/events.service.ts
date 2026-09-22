@@ -1,4 +1,8 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
 import { MetaCapiService } from '../meta/meta-capi.service';
 import {
@@ -6,6 +10,44 @@ import {
   isLikelyArtificialName,
 } from '../common/utils/phone';
 import type { EnqueueEventDto } from './dto/enqueue-event.dto';
+import { evaluateMetaAcceptanceEvidence } from '../meta/meta-acceptance';
+
+export type NestEventLookupResponse = {
+  ok: true;
+  found: true;
+  event_id: string;
+  event_name: string;
+  /** Estado SQLite Nest (pending|processing|sent|failed|dead|cancelled). */
+  status: string;
+  attempt_count: number;
+  last_error: string | null;
+  delivery_lane: string;
+  dataset_id: string;
+  sent_at: string | null;
+  updated_at: string;
+  created_at: string;
+  /** Evidencia Graph redacted si existe (solo tras markSent tipicamente). */
+  meta_response: {
+    http_status: number | null;
+    events_received: number | null;
+    fbtrace_id: string | null;
+    error_code: string | number | null;
+    error_type: string | null;
+  } | null;
+  /**
+   * Derivado de status + meta_response. No inventa aceptación:
+   * - api_accepted solo si status=sent y evidencia Graph coherente
+   * - api_rejected si dead/failed con error o meta_response rechazada
+   * - insufficient_evidence / unknown en el resto
+   */
+  acceptance_tier:
+    | 'api_accepted'
+    | 'api_rejected'
+    | 'insufficient_evidence'
+    | 'unknown';
+  /** Alias explícito para el CRM: true solo con api_accepted. */
+  api_accepted: boolean;
+};
 
 @Injectable()
 export class EventsService {
@@ -13,6 +55,82 @@ export class EventsService {
     private readonly db: DatabaseService,
     private readonly meta: MetaCapiService,
   ) {}
+
+  /**
+   * Lookup de trazabilidad por event_id (solo lectura SQLite).
+   * No reenvía ni marca históricos como aceptados sin evidencia.
+   */
+  lookupByEventId(eventId: string): NestEventLookupResponse {
+    const id = String(eventId || '').trim();
+    if (!id) throw new BadRequestException('event_id_required');
+    const row = this.db.getLatestByEventId(id);
+    if (!row) throw new NotFoundException('event_not_found');
+
+    let metaResponse: NestEventLookupResponse['meta_response'] = null;
+    if (row.meta_response_redacted) {
+      try {
+        const parsed = JSON.parse(row.meta_response_redacted) as Record<
+          string,
+          unknown
+        >;
+        metaResponse = {
+          http_status:
+            typeof parsed.http_status === 'number' ? parsed.http_status : null,
+          events_received:
+            typeof parsed.events_received === 'number'
+              ? parsed.events_received
+              : null,
+          fbtrace_id:
+            typeof parsed.fbtrace_id === 'string' ? parsed.fbtrace_id : null,
+          error_code:
+            parsed.error_code != null
+              ? (parsed.error_code as string | number)
+              : null,
+          error_type:
+            typeof parsed.error_type === 'string' ? parsed.error_type : null,
+        };
+      } catch {
+        metaResponse = null;
+      }
+    }
+
+    let acceptance_tier: NestEventLookupResponse['acceptance_tier'] = 'unknown';
+    if (row.status === 'sent' && metaResponse) {
+      const httpStatus = metaResponse.http_status ?? 0;
+      const evidence = evaluateMetaAcceptanceEvidence({
+        httpOk: httpStatus >= 200 && httpStatus < 300,
+        httpStatus,
+        error: metaResponse.error_code ? { code: metaResponse.error_code } : undefined,
+        eventsReceived: metaResponse.events_received,
+        expectedEvents: 1,
+        eventId: row.event_id,
+        fbtraceId: metaResponse.fbtrace_id,
+      });
+      acceptance_tier = evidence.tier;
+    } else if (row.status === 'dead' || row.status === 'failed') {
+      acceptance_tier = 'api_rejected';
+    } else if (row.status === 'sent' && !metaResponse) {
+      acceptance_tier = 'insufficient_evidence';
+    }
+
+    return {
+      ok: true,
+      found: true,
+      event_id: row.event_id,
+      event_name: row.event_name,
+      status: row.status,
+      attempt_count: row.attempt_count,
+      last_error: row.last_error,
+      delivery_lane: row.delivery_lane,
+      dataset_id: row.dataset_id,
+      sent_at: row.sent_at,
+      updated_at: row.updated_at,
+      created_at: row.created_at,
+      meta_response: metaResponse,
+      acceptance_tier,
+      api_accepted: acceptance_tier === 'api_accepted',
+    };
+  }
 
   enqueue(dto: EnqueueEventDto) {
     if (!dto.ads_consent) {
