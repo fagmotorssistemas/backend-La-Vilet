@@ -112,6 +112,18 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     return this.store.cancelProcessingIfRevoked(id);
   }
 
+  /** Anula Purchase en cola (pending/failed/processing/dead). No toca sent. */
+  cancelPurchaseBySaleId(saleId: string, reason: string): number {
+    return this.store.cancelPurchaseBySaleId(saleId, reason);
+  }
+
+  /**
+   * Solo sent: anota anulación posterior sin revertir ni inventar Graph negativo.
+   */
+  annotatePurchaseAnnulledAfterAccept(saleId: string, note: string): number {
+    return this.store.annotatePurchaseAnnulledAfterAccept(saleId, note);
+  }
+
   cancelByEventIds(eventIds: string[], reason?: string) {
     return this.store.cancelByEventIds(eventIds, reason);
   }

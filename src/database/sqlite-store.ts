@@ -875,6 +875,48 @@ export class SqliteOutboxStore {
   }
 
   /**
+   * Cancela Purchase no enviados por sale_id (idempotency purchase:{saleId}).
+   * No modifica filas sent (evidencia Graph se conserva).
+   */
+  cancelPurchaseBySaleId(saleId: string, reason: string): number {
+    const id = String(saleId || '').trim();
+    if (!id) return 0;
+    const key = `purchase:${id}`;
+    const result = this.db
+      .prepare(
+        `UPDATE outbox_events
+         SET status = 'cancelled',
+             last_error = ?,
+             updated_at = datetime('now')
+         WHERE event_name = 'Purchase'
+           AND idempotency_key = ?
+           AND status IN ('pending', 'failed', 'processing', 'dead')`,
+      )
+      .run(reason.slice(0, 500), key);
+    return result.changes;
+  }
+
+  /**
+   * Purchase ya sent: solo anota last_error; no cambia status ni inventa refund.
+   */
+  annotatePurchaseAnnulledAfterAccept(saleId: string, note: string): number {
+    const id = String(saleId || '').trim();
+    if (!id) return 0;
+    const key = `purchase:${id}`;
+    const result = this.db
+      .prepare(
+        `UPDATE outbox_events
+         SET last_error = ?,
+             updated_at = datetime('now')
+         WHERE event_name = 'Purchase'
+           AND idempotency_key = ?
+           AND status = 'sent'`,
+      )
+      .run(note.slice(0, 500), key);
+    return result.changes;
+  }
+
+  /**
    * Cancela por event_id sin borrar la fila (conserva registro / graph_payload).
    * Afecta pending|failed|processing|dead — no sent ni ya cancelled.
    */

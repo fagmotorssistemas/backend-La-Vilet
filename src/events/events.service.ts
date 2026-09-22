@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Injectable,
+  InternalServerErrorException,
   NotFoundException,
 } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
@@ -70,73 +71,101 @@ export class EventsService {
   lookupByEventId(eventId: string): NestEventLookupResponse {
     const id = String(eventId || '').trim();
     if (!id) throw new BadRequestException('event_id_required');
-    const row = this.db.getLatestByEventId(id);
-    if (!row) throw new NotFoundException('event_not_found');
-
-    let metaResponse: NestEventLookupResponse['meta_response'] = null;
-    if (row.meta_response_redacted) {
-      try {
-        const parsed = JSON.parse(row.meta_response_redacted) as Record<
-          string,
-          unknown
-        >;
-        metaResponse = {
-          http_status:
-            typeof parsed.http_status === 'number' ? parsed.http_status : null,
-          events_received:
-            typeof parsed.events_received === 'number'
-              ? parsed.events_received
-              : null,
-          fbtrace_id:
-            typeof parsed.fbtrace_id === 'string' ? parsed.fbtrace_id : null,
-          error_code:
-            parsed.error_code != null
-              ? (parsed.error_code as string | number)
-              : null,
-          error_type:
-            typeof parsed.error_type === 'string' ? parsed.error_type : null,
-        };
-      } catch {
-        metaResponse = null;
+    try {
+      const row = this.db.getLatestByEventId(id);
+      if (!row) {
+        // Contrato explícito para CRM/FE: ausente ≠ rechazo Meta.
+        throw new NotFoundException({
+          ok: false,
+          found: false,
+          error: 'event_not_found',
+          event_id: id,
+        });
       }
-    }
 
-    let acceptance_tier: NestEventLookupResponse['acceptance_tier'] = 'unknown';
-    if (row.status === 'sent' && metaResponse) {
-      const httpStatus = metaResponse.http_status ?? 0;
-      const evidence = evaluateMetaAcceptanceEvidence({
-        httpOk: httpStatus >= 200 && httpStatus < 300,
-        httpStatus,
-        error: metaResponse.error_code ? { code: metaResponse.error_code } : undefined,
-        eventsReceived: metaResponse.events_received,
-        expectedEvents: 1,
-        eventId: row.event_id,
-        fbtraceId: metaResponse.fbtrace_id,
+      let metaResponse: NestEventLookupResponse['meta_response'] = null;
+      if (row.meta_response_redacted) {
+        try {
+          const parsed = JSON.parse(row.meta_response_redacted) as Record<
+            string,
+            unknown
+          >;
+          metaResponse = {
+            http_status:
+              typeof parsed.http_status === 'number' ? parsed.http_status : null,
+            events_received:
+              typeof parsed.events_received === 'number'
+                ? parsed.events_received
+                : null,
+            fbtrace_id:
+              typeof parsed.fbtrace_id === 'string' ? parsed.fbtrace_id : null,
+            error_code:
+              parsed.error_code != null
+                ? (parsed.error_code as string | number)
+                : null,
+            error_type:
+              typeof parsed.error_type === 'string' ? parsed.error_type : null,
+          };
+        } catch {
+          metaResponse = null;
+        }
+      }
+
+      let acceptance_tier: NestEventLookupResponse['acceptance_tier'] =
+        'unknown';
+      if (row.status === 'sent' && metaResponse) {
+        const httpStatus = metaResponse.http_status ?? 0;
+        const evidence = evaluateMetaAcceptanceEvidence({
+          httpOk: httpStatus >= 200 && httpStatus < 300,
+          httpStatus,
+          error: metaResponse.error_code
+            ? { code: metaResponse.error_code }
+            : undefined,
+          eventsReceived: metaResponse.events_received,
+          expectedEvents: 1,
+          eventId: row.event_id,
+          fbtraceId: metaResponse.fbtrace_id,
+        });
+        acceptance_tier = evidence.tier;
+      } else if (row.status === 'dead' || row.status === 'failed') {
+        acceptance_tier = 'api_rejected';
+      } else if (row.status === 'sent' && !metaResponse) {
+        acceptance_tier = 'insufficient_evidence';
+      }
+
+      return {
+        ok: true,
+        found: true,
+        event_id: row.event_id,
+        event_name: row.event_name,
+        status: row.status,
+        attempt_count: row.attempt_count,
+        last_error: row.last_error,
+        delivery_lane: row.delivery_lane,
+        dataset_id: row.dataset_id,
+        sent_at: row.sent_at,
+        updated_at: row.updated_at,
+        created_at: row.created_at,
+        meta_response: metaResponse,
+        acceptance_tier,
+        api_accepted: acceptance_tier === 'api_accepted',
+      };
+    } catch (error) {
+      if (
+        error instanceof NotFoundException ||
+        error instanceof BadRequestException ||
+        error instanceof InternalServerErrorException
+      ) {
+        throw error;
+      }
+      // Transitorio/interno: nunca inventar aceptación o rechazo Meta.
+      throw new InternalServerErrorException({
+        ok: false,
+        found: false,
+        error: 'lookup_internal_error',
+        event_id: id,
       });
-      acceptance_tier = evidence.tier;
-    } else if (row.status === 'dead' || row.status === 'failed') {
-      acceptance_tier = 'api_rejected';
-    } else if (row.status === 'sent' && !metaResponse) {
-      acceptance_tier = 'insufficient_evidence';
     }
-
-    return {
-      ok: true,
-      found: true,
-      event_id: row.event_id,
-      event_name: row.event_name,
-      status: row.status,
-      attempt_count: row.attempt_count,
-      last_error: row.last_error,
-      delivery_lane: row.delivery_lane,
-      dataset_id: row.dataset_id,
-      sent_at: row.sent_at,
-      updated_at: row.updated_at,
-      created_at: row.created_at,
-      meta_response: metaResponse,
-      acceptance_tier,
-      api_accepted: acceptance_tier === 'api_accepted',
-    };
   }
 
   enqueue(dto: EnqueueEventDto) {

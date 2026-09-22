@@ -26,4 +26,22 @@ describe('events lookup contract shape', () => {
     });
     expect(insuf.tier).toBe('insufficient_evidence');
   });
+
+  it('ausente y error interno no inventan aceptación', () => {
+    const absent = {
+      ok: false as const,
+      found: false as const,
+      error: 'event_not_found',
+      event_id: '123ddc30-a6dc-4861-a87e-9ea22cebd313',
+    };
+    expect(absent.found).toBe(false);
+    expect(absent).not.toHaveProperty('api_accepted', true);
+
+    const internal = {
+      ok: false as const,
+      found: false as const,
+      error: 'lookup_internal_error',
+    };
+    expect(internal.error).toBe('lookup_internal_error');
+  });
 });

@@ -10,6 +10,7 @@ import { DatabaseService } from '../database/database.service';
 import { EventsService } from '../events/events.service';
 import { MetaCapiService } from '../meta/meta-capi.service';
 import { decideWaLeadSubmittedConsentGate } from '../meta/wa-lead-submitted-consent-gate';
+import { decidePurchaseAnnulment } from '../meta/purchase-annulment-gate';
 
 type SupabaseOutboxRow = {
   id: string;
@@ -317,6 +318,57 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
       .trim()
       .toLowerCase();
     return raw === 'true' || raw === '1';
+  }
+
+  /**
+   * Anulación Purchase en drain: cancel / hold / allow.
+   * Si Nest ya tiene sent, FE cancela cola local; Nest conserva evidencia vía worker annotate.
+   */
+  private async purchaseAnnulmentForDrain(
+    row: SupabaseOutboxRow,
+    payload: Record<string, unknown>,
+  ): Promise<'ok' | 'cancelled' | 'skipped'> {
+    const fromPayload =
+      typeof payload.sale_id === 'string' ? payload.sale_id.trim() : '';
+    const fromKey = /^purchase:(.+)$/i.exec(row.idempotency_key || '');
+    const saleId = fromPayload || (fromKey?.[1] || '').trim();
+    if (!saleId) return 'cancelled';
+    try {
+      const qs = new URLSearchParams({
+        select: 'id,contract_id,contract:contracts(id,status)',
+        id: `eq.${saleId}`,
+        limit: '1',
+      });
+      const res = await this.supabaseFetch(
+        `/rest/v1/unit_sales_closings?${qs}`,
+      );
+      if (!res.ok) return 'skipped';
+      const rows = (await res.json()) as Array<{
+        id: string;
+        contract_id: string | null;
+        contract:
+          | { id: string; status: string | null }
+          | { id: string; status: string | null }[]
+          | null;
+      }>;
+      if (!rows.length) {
+        const d = decidePurchaseAnnulment(null);
+        return d.action === 'cancel' ? 'cancelled' : 'skipped';
+      }
+      const c = rows[0].contract;
+      const contract = Array.isArray(c) ? c[0] : c;
+      const d = decidePurchaseAnnulment({
+        saleId,
+        contractId: contract?.id || rows[0].contract_id,
+        contractStatus: contract?.status ?? null,
+        nestAlreadyAccepted: false,
+      });
+      if (d.action === 'cancel') return 'cancelled';
+      if (d.action === 'hold_retry') return 'skipped';
+      return 'ok';
+    } catch {
+      return 'skipped';
+    }
   }
 
   private async recoverMissingScheduleOutbox() {
@@ -856,6 +908,21 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
       if (gate.action === 'hold_pending') {
         this.logger.log(
           `drain hold ${gate.reason} event_id=${row.event_id} (conservado pending)`,
+        );
+        return 'skipped';
+      }
+    }
+
+    // Purchase: anulación CRM antes de copiar a Nest (además del gate en worker).
+    if (row.event_name === 'Purchase') {
+      const purchaseGate = await this.purchaseAnnulmentForDrain(row, payload);
+      if (purchaseGate === 'cancelled') {
+        await this.markSupabase(row.id, 'cancelled', 'contract_anulado');
+        return 'cancelled';
+      }
+      if (purchaseGate === 'skipped') {
+        this.logger.log(
+          `drain hold purchase_sale_lookup_transient event_id=${row.event_id}`,
         );
         return 'skipped';
       }

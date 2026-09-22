@@ -11,6 +11,10 @@ import {
   countGraphPayloadEvents,
   evaluateMetaAcceptanceEvidence,
 } from '../meta/meta-acceptance';
+import {
+  decidePurchaseAnnulment,
+  saleIdFromPurchaseRow,
+} from '../meta/purchase-annulment-gate';
 import { decideWaLeadSubmittedConsentGate } from '../meta/wa-lead-submitted-consent-gate';
 
 @Injectable()
@@ -165,6 +169,32 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
           continue;
         }
 
+        if (fresh.event_name === 'Purchase' && purchaseDeliveryOn) {
+          const gate = await this.resolvePurchaseAnnulmentGate(fresh);
+          if (gate.action === 'cancel') {
+            this.db.cancelByEventIds([fresh.event_id], gate.reason);
+            this.logger.log(
+              `outbox cancel purchase ${gate.reason} id=${row.id}`,
+            );
+            continue;
+          }
+          if (gate.action === 'hold_retry') {
+            this.db.releaseProcessingToPending(row.id, gate.reason);
+            this.logger.log(
+              `outbox hold purchase ${gate.reason} id=${row.id}`,
+            );
+            continue;
+          }
+          if (gate.action === 'annotate_after_accept') {
+            const saleId = saleIdFromPurchaseRow(fresh);
+            if (saleId) {
+              this.db.annotatePurchaseAnnulledAfterAccept(saleId, gate.reason);
+            }
+            this.db.releaseProcessingToPending(row.id, gate.reason);
+            continue;
+          }
+        }
+
         let payload = JSON.parse(fresh.graph_payload) as Record<
           string,
           unknown
@@ -308,6 +338,64 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
       .trim()
       .toLowerCase();
     return raw === 'true' || raw === '1';
+  }
+
+  /**
+   * Valida anulación CRM antes de Graph y en reintentos.
+   * Sin SUPABASE_* → hold (no enviar a ciegas).
+   */
+  private async resolvePurchaseAnnulmentGate(row: {
+    idempotency_key: string;
+    payload_redacted: string | null;
+    status: string;
+  }) {
+    const saleId = saleIdFromPurchaseRow(row);
+    if (!saleId) {
+      return decidePurchaseAnnulment(null);
+    }
+    const url = this.supabaseUrl();
+    const key = this.serviceRoleKey();
+    if (!url || !key) {
+      return decidePurchaseAnnulment(null, { lookupFailed: true });
+    }
+    try {
+      const qs = new URLSearchParams({
+        select: 'id,contract_id,contract:contracts(id,status)',
+        id: `eq.${saleId}`,
+        limit: '1',
+      });
+      const res = await fetch(`${url}/rest/v1/unit_sales_closings?${qs}`, {
+        headers: {
+          apikey: key,
+          Authorization: `Bearer ${key}`,
+        },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!res.ok) {
+        return decidePurchaseAnnulment(null, { lookupFailed: true });
+      }
+      const rows = (await res.json()) as Array<{
+        id: string;
+        contract_id: string | null;
+        contract:
+          | { id: string; status: string | null }
+          | { id: string; status: string | null }[]
+          | null;
+      }>;
+      if (!rows.length) {
+        return decidePurchaseAnnulment(null);
+      }
+      const c = rows[0].contract;
+      const contract = Array.isArray(c) ? c[0] : c;
+      return decidePurchaseAnnulment({
+        saleId,
+        contractId: contract?.id || rows[0].contract_id,
+        contractStatus: contract?.status ?? null,
+        nestAlreadyAccepted: false,
+      });
+    } catch {
+      return decidePurchaseAnnulment(null, { lookupFailed: true });
+    }
   }
 
   private supabaseUrl() {
