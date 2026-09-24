@@ -5,6 +5,7 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { createHash } from 'crypto';
 import { DatabaseService } from '../database/database.service';
 import { MetaCapiService } from '../meta/meta-capi.service';
 import {
@@ -15,11 +16,7 @@ import {
   decidePurchaseAnnulment,
   saleIdFromPurchaseRow,
 } from '../meta/purchase-annulment-gate';
-import {
-  isPurchaseEligibleAfterActivation,
-  parseExistingTimestampMs,
-  parsePurchaseActivatedAtMs,
-} from '../meta/purchase-activation-cutover';
+import { evaluatePurchaseActivationGate } from '../meta/purchase-activation-cutover';
 import { decideWaLeadSubmittedConsentGate } from '../meta/wa-lead-submitted-consent-gate';
 
 @Injectable()
@@ -74,7 +71,10 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
     if (this.running) return;
     this.running = true;
     try {
-      const allowed = this.meta.assertSendAllowed();
+      // La sincronización de resultados es independiente del envío Graph. Debe
+      // recuperarse incluso si META_MODE se desactiva después de una aceptación.
+      await this.flushMetaResultSync();
+      const allowed = this.meta.assertModeAllowed();
       if (!allowed.ok) {
         this.lastTickAt = new Date().toISOString();
         this.lastTickError = null;
@@ -86,11 +86,14 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
       const lane = this.meta.mode === 'test' ? 'test' : 'live';
       const scheduleDeliveryOn = this.isScheduleDeliveryEnabled();
       const waLeadSubmittedDeliveryOn = this.isWaLeadSubmittedDeliveryEnabled();
+      const waCrmQualificationDeliveryOn =
+        this.isWaCrmQualificationDeliveryEnabled();
       const purchaseDeliveryOn = this.isPurchaseDeliveryEnabled();
       // Delivery OFF: no claim Schedule / LeadSubmitted / Purchase → no se envían ni se pierden.
       const claimed = this.db.claimPending(batch, lane, {
         excludeSchedule: !scheduleDeliveryOn,
         excludeLeadSubmitted: !waLeadSubmittedDeliveryOn,
+        excludeQualifiedLead: !waCrmQualificationDeliveryOn,
         excludePurchase: !purchaseDeliveryOn,
       });
 
@@ -112,7 +115,7 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
 
         // LeadSubmitted: solo false cancela; null/ausente permiten (fuente leads) + scope.
         // Otros eventos: solo cancelan si consent === false (comportamiento previo).
-        if (fresh.event_name === 'LeadSubmitted') {
+        if (['LeadSubmitted', 'QualifiedLead'].includes(fresh.event_name)) {
           const gate = await this.resolveLeadSubmittedConsentGate(fresh);
           if (gate.action === 'cancel_revoked') {
             this.db.cancelProcessingIfRevoked(row.id);
@@ -152,13 +155,27 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
           continue;
         }
 
-        if (fresh.event_name === 'LeadSubmitted' && !waLeadSubmittedDeliveryOn) {
+        if (
+          fresh.event_name === 'LeadSubmitted' &&
+          !waLeadSubmittedDeliveryOn
+        ) {
           this.db.releaseProcessingToPending(
             row.id,
             'wa_lead_submitted_delivery_inactive',
           );
           this.logger.log(
             `outbox skip wa_lead_submitted_delivery_inactive id=${row.id} (conservado pending)`,
+          );
+          continue;
+        }
+
+        if (
+          fresh.event_name === 'QualifiedLead' &&
+          !waCrmQualificationDeliveryOn
+        ) {
+          this.db.releaseProcessingToPending(
+            row.id,
+            'wa_crm_qualification_delivery_inactive',
           );
           continue;
         }
@@ -175,14 +192,10 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
         }
 
         if (fresh.event_name === 'Purchase' && purchaseDeliveryOn) {
-          if (!this.isPurchaseWithinActivationCutover(fresh)) {
-            this.db.releaseProcessingToPending(
-              row.id,
-              'purchase_before_activation_cutover',
-            );
-            this.logger.log(
-              `outbox hold purchase_before_activation_cutover id=${row.id}`,
-            );
+          const cutoverGate = this.purchaseActivationGate(fresh);
+          if (!cutoverGate.ok) {
+            this.db.releaseProcessingToPending(row.id, cutoverGate.reason);
+            this.logger.log(`outbox hold ${cutoverGate.reason} id=${row.id}`);
             continue;
           }
           const gate = await this.resolvePurchaseAnnulmentGate(fresh);
@@ -195,9 +208,7 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
           }
           if (gate.action === 'hold_retry') {
             this.db.releaseProcessingToPending(row.id, gate.reason);
-            this.logger.log(
-              `outbox hold purchase ${gate.reason} id=${row.id}`,
-            );
+            this.logger.log(`outbox hold purchase ${gate.reason} id=${row.id}`);
             continue;
           }
           if (gate.action === 'annotate_after_accept') {
@@ -221,6 +232,18 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
           delete payload.test_event_code;
         }
 
+        const credentialGate = this.meta.assertSendAllowedFor(
+          payload,
+          fresh.event_name,
+        );
+        if (!credentialGate.ok) {
+          this.db.releaseProcessingToPending(row.id, credentialGate.reason);
+          this.logger.log(
+            `outbox hold credential id=${row.id} event=${fresh.event_name}`,
+          );
+          continue;
+        }
+
         const expectedEvents = countGraphPayloadEvents(payload);
         const result = await this.meta.sendToMeta(fresh.dataset_id, payload, {
           eventName: fresh.event_name,
@@ -237,8 +260,8 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
         });
 
         if (result.ok && evidence.tier === 'api_accepted') {
-          this.db.markSent(row.id, result.bodyRedacted);
-          await this.logMetaAccepted({
+          const syncPayload = this.metaResultSyncPayload({
+            stage: 'meta_accepted',
             eventName: fresh.event_name,
             eventId: fresh.event_id,
             leadId: fresh.lead_id,
@@ -251,46 +274,18 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
             expectedEvents,
             correlated: evidence.correlated,
           });
+          if (typeof this.db.markSentAndQueueResult === 'function') {
+            this.db.markSentAndQueueResult(
+              row.id,
+              result.bodyRedacted,
+              syncPayload,
+            );
+          } else {
+            // Compatibilidad de dobles de prueba antiguos; DatabaseService real
+            // siempre expone la operación atómica.
+            this.db.markSent(row.id, result.bodyRedacted);
+          }
           continue;
-        }
-
-        if (result.ok && evidence.tier !== 'api_accepted') {
-          await this.logMetaConversion({
-            stage: 'meta_rejected',
-            eventName: fresh.event_name,
-            reason: evidence.reason || 'insufficient_meta_acceptance_evidence',
-            eventId: fresh.event_id,
-            leadId: fresh.lead_id,
-            idempotencyKey: fresh.idempotency_key,
-            deliveryLane: fresh.delivery_lane,
-            details: {
-              fbtrace_id: result.fbtraceId,
-              events_received: result.eventsReceived,
-              expected_events: expectedEvents,
-              http_status: result.httpStatus,
-              dataset_id: fresh.dataset_id,
-              acceptance_tier: evidence.tier,
-              note: 'api_http_ok_but_not_counted_as_meta_accepted',
-            },
-          });
-        } else if (fresh.event_name === 'LeadSubmitted') {
-          await this.logMetaConversion({
-            stage: 'meta_rejected',
-            eventName: fresh.event_name,
-            reason: result.errorMessage || 'meta_error',
-            eventId: fresh.event_id,
-            leadId: fresh.lead_id,
-            idempotencyKey: fresh.idempotency_key,
-            deliveryLane: fresh.delivery_lane,
-            details: {
-              fbtrace_id: result.fbtraceId,
-              events_received: result.eventsReceived,
-              expected_events: expectedEvents,
-              http_status: result.httpStatus,
-              dataset_id: fresh.dataset_id,
-              acceptance_tier: evidence.tier,
-            },
-          });
         }
 
         const attempts = fresh.attempt_count;
@@ -300,12 +295,44 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
           Math.pow(2, Math.min(attempts, 8)) * 5,
         );
         const next = new Date(Date.now() + backoffSec * 1000).toISOString();
-        this.db.markRetry(
-          row.id,
-          result.errorMessage || evidence.reason || 'unknown',
-          next,
-          dead,
-        );
+        const deliveryOutcome = result.ok
+          ? 'meta_unverified'
+          : result.httpStatus === 0
+            ? 'transport_failed'
+            : 'meta_rejected';
+        const syncPayload = this.metaResultSyncPayload({
+          stage: deliveryOutcome,
+          eventName: fresh.event_name,
+          eventId: fresh.event_id,
+          leadId: fresh.lead_id,
+          idempotencyKey: fresh.idempotency_key,
+          deliveryLane: fresh.delivery_lane,
+          datasetId: fresh.dataset_id,
+          fbtraceId: result.fbtraceId,
+          eventsReceived: result.eventsReceived,
+          httpStatus: result.httpStatus,
+          expectedEvents,
+          correlated: evidence.correlated,
+          reason: result.errorMessage || evidence.reason || 'unknown',
+        });
+        if (typeof this.db.markRetryAndQueueResult === 'function') {
+          this.db.markRetryAndQueueResult(
+            row.id,
+            result.errorMessage || evidence.reason || 'unknown',
+            next,
+            dead,
+            deliveryOutcome,
+            result.bodyRedacted,
+            syncPayload,
+          );
+        } else {
+          this.db.markRetry(
+            row.id,
+            result.errorMessage || evidence.reason || 'unknown',
+            next,
+            dead,
+          );
+        }
         this.logger.warn(
           `outbox id=${row.id} event=${row.event_name} attempt=${attempts} dead=${dead}`,
         );
@@ -313,6 +340,7 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
 
       const retention = Number(this.config.get('OUTBOX_RETENTION_DAYS')) || 90;
       this.db.purgeOld(retention);
+      await this.flushMetaResultSync();
       this.lastTickAt = new Date().toISOString();
       this.lastTickError = null;
     } catch (error) {
@@ -345,6 +373,16 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
     return raw === 'true' || raw === '1';
   }
 
+  private isWaCrmQualificationDeliveryEnabled() {
+    const raw = String(
+      this.config.get<string>('META_WA_CRM_QUALIFICATION_DELIVERY_ENABLED') ||
+        '',
+    )
+      .trim()
+      .toLowerCase();
+    return raw === 'true' || raw === '1';
+  }
+
   /** Purchase tipado; envío Graph apagado por defecto hasta activación explícita. */
   private isPurchaseDeliveryEnabled() {
     const raw = String(
@@ -355,24 +393,17 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
     return raw === 'true' || raw === '1';
   }
 
-  private purchaseActivatedAtMs(): number | null {
-    return parsePurchaseActivatedAtMs(
-      this.config.get<string>('META_PURCHASE_ACTIVATED_AT'),
-    );
-  }
-
   /**
    * Corte: registered_at (CRM) Y sale_at (confirmación comercial existente).
    * Ambos deben ser >= META_PURCHASE_ACTIVATED_AT. No inventa fechas.
    */
-  private isPurchaseWithinActivationCutover(row: {
+  private purchaseActivationGate(row: {
     created_at: string;
+    event_time: number;
     payload_redacted: string | null;
-  }): boolean {
-    const cut = this.purchaseActivatedAtMs();
-    if (cut == null) return false;
-    let registeredMs: number | null = null;
-    let saleAtMs: number | null = null;
+  }): { ok: true } | { ok: false; reason: string } {
+    let registeredAt: unknown = null;
+    let saleAt: unknown = null;
     try {
       const parsed = JSON.parse(row.payload_redacted || '{}') as Record<
         string,
@@ -382,28 +413,23 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
         parsed.details && typeof parsed.details === 'object'
           ? (parsed.details as Record<string, unknown>)
           : null;
-      registeredMs = parseExistingTimestampMs(
+      registeredAt =
         (typeof parsed.registered_at === 'string' && parsed.registered_at) ||
-          (typeof details?.registered_at === 'string' &&
-            details.registered_at) ||
-          null,
-      );
-      saleAtMs = parseExistingTimestampMs(
+        (typeof details?.registered_at === 'string' && details.registered_at) ||
+        null;
+      saleAt =
         (typeof parsed.sale_at === 'string' && parsed.sale_at) ||
-          (typeof details?.sale_at === 'string' && details.sale_at) ||
-          null,
-      );
+        (typeof details?.sale_at === 'string' && details.sale_at) ||
+        null;
     } catch {
-      registeredMs = null;
-      saleAtMs = null;
+      registeredAt = null;
+      saleAt = null;
     }
-    if (registeredMs == null) {
-      registeredMs = parseExistingTimestampMs(row.created_at);
-    }
-    return isPurchaseEligibleAfterActivation({
-      registeredAtMs: registeredMs,
-      commercialConfirmedAtMs: saleAtMs,
-      activatedAtMs: cut,
+    return evaluatePurchaseActivationGate({
+      registeredAt,
+      saleAt,
+      eventTime: row.event_time,
+      activatedAt: this.config.get<string>('META_PURCHASE_ACTIVATED_AT'),
     });
   }
 
@@ -613,7 +639,8 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async logMetaAccepted(input: {
+  private metaResultSyncPayload(input: {
+    stage: string;
     eventName: string;
     eventId: string;
     leadId: string | null;
@@ -625,16 +652,17 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
     httpStatus: number;
     expectedEvents: number;
     correlated: boolean;
-  }) {
-    await this.logMetaConversion({
-      stage: 'meta_accepted',
-      eventName: input.eventName,
-      reason: null,
-      eventId: input.eventId,
-      leadId: input.leadId,
-      idempotencyKey: input.idempotencyKey,
-      deliveryLane: input.deliveryLane,
-      details: {
+    reason?: string | null;
+  }): Record<string, unknown> {
+    return {
+      p_stage: input.stage,
+      p_event_name: input.eventName,
+      p_reason: input.reason || null,
+      p_lead_id: input.leadId,
+      p_event_id: input.eventId,
+      p_idempotency_key: input.idempotencyKey,
+      p_delivery_lane: input.deliveryLane,
+      p_details: {
         fbtrace_id: input.fbtraceId,
         events_received: input.eventsReceived,
         expected_events: input.expectedEvents,
@@ -644,43 +672,77 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
         acceptance_layer: 'graph_api',
         events_manager: 'not_verified_here',
       },
-    });
+    };
   }
 
-  private async logMetaConversion(input: {
-    stage: string;
-    eventName: string;
-    reason: string | null;
-    eventId: string;
-    leadId: string | null;
-    idempotencyKey: string;
-    deliveryLane: string;
-    details: Record<string, unknown>;
-  }) {
+  private async flushMetaResultSync() {
+    if (typeof this.db.claimMetaResultSync !== 'function') return;
     const url = this.supabaseUrl();
     const key = this.serviceRoleKey();
     if (!url || !key) return;
-    try {
-      await fetch(`${url}/rest/v1/rpc/lv_log_meta_conversion`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          apikey: key,
-          Authorization: `Bearer ${key}`,
-        },
-        body: JSON.stringify({
-          p_stage: input.stage,
-          p_event_name: input.eventName,
-          p_reason: input.reason,
-          p_lead_id: input.leadId,
-          p_event_id: input.eventId,
-          p_idempotency_key: input.idempotencyKey,
-          p_delivery_lane: input.deliveryLane,
-          p_details: input.details,
-        }),
-      });
-    } catch {
-      // soft-fail
+    const rows = this.db.claimMetaResultSync(20);
+    for (const row of rows) {
+      try {
+        const rpcPayload = JSON.parse(row.payload_json) as Record<
+          string,
+          unknown
+        >;
+        const logRow = {
+          id: deterministicResultSyncId(row.event_id, row.stage),
+          event_name: rpcPayload.p_event_name,
+          stage: rpcPayload.p_stage,
+          reason: rpcPayload.p_reason,
+          lead_id: rpcPayload.p_lead_id,
+          event_id: rpcPayload.p_event_id,
+          idempotency_key: rpcPayload.p_idempotency_key,
+          delivery_lane: rpcPayload.p_delivery_lane,
+          details: rpcPayload.p_details,
+        };
+        const response = await fetch(
+          `${url}/rest/v1/meta_capi_conversion_log?on_conflict=id`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              apikey: key,
+              Authorization: `Bearer ${key}`,
+              Prefer: 'resolution=merge-duplicates,return=minimal',
+            },
+            body: JSON.stringify(logRow),
+            signal: AbortSignal.timeout(5000),
+          },
+        );
+        if (!response.ok) {
+          throw new Error(`result_sync_http_${response.status}`);
+        }
+        this.db.markMetaResultSynced(row.id);
+      } catch (error) {
+        const backoffSec = Math.min(
+          3600,
+          Math.pow(2, Math.min(row.attempt_count, 8)) * 5,
+        );
+        this.db.markMetaResultSyncRetry(
+          row.id,
+          error instanceof Error ? error.message : 'result_sync_failed',
+          new Date(Date.now() + backoffSec * 1000).toISOString(),
+        );
+      }
     }
   }
+}
+
+/** UUID estable para que un timeout tras commit pueda reintentarse sin duplicar. */
+export function deterministicResultSyncId(
+  eventId: string,
+  stage: string,
+): string {
+  const hex = createHash('sha256')
+    .update(`lavilet-meta-result:${eventId}:${stage}`)
+    .digest('hex')
+    .slice(0, 32)
+    .split('');
+  hex[12] = '5';
+  hex[16] = ((parseInt(hex[16], 16) & 0x3) | 0x8).toString(16);
+  const value = hex.join('');
+  return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20)}`;
 }

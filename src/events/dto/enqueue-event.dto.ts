@@ -4,6 +4,8 @@ import {
   IsIn,
   IsInt,
   IsNumber,
+  IsNotEmpty,
+  IsISO8601,
   IsOptional,
   IsString,
   IsUUID,
@@ -19,6 +21,7 @@ export const META_ENQUEUE_EVENT_NAMES = [
   'Lead',
   'Schedule',
   'LeadSubmitted',
+  'QualifiedLead',
   'AddToWishlist',
   'Purchase',
 ] as const;
@@ -30,6 +33,7 @@ export class EnqueueEventDto {
   event_name!: MetaEnqueueEventName;
 
   @IsString()
+  @IsNotEmpty()
   @MaxLength(200)
   idempotency_key!: string;
 
@@ -45,11 +49,7 @@ export class EnqueueEventDto {
 
   @IsIn(['website', 'system_generated', 'business_messaging', 'other', 'chat'])
   action_source!:
-    | 'website'
-    | 'system_generated'
-    | 'business_messaging'
-    | 'other'
-    | 'chat';
+    'website' | 'system_generated' | 'business_messaging' | 'other' | 'chat';
 
   @IsOptional()
   @IsString()
@@ -167,12 +167,14 @@ export class EnqueueEventDto {
   /** Momento de registro FE (corte Purchase). */
   @IsOptional()
   @IsString()
+  @IsISO8601({ strict: true })
   @MaxLength(40)
   registered_at?: string;
 
   /** Confirmación comercial existente (FE sale_at). No inventar. */
   @IsOptional()
   @IsString()
+  @IsISO8601({ strict: true })
   @MaxLength(40)
   sale_at?: string;
 
@@ -224,8 +226,27 @@ export class EnqueueEventDto {
   @MaxLength(64)
   contact_id?: string;
 
+  /** Clasificación CRM interna. Se persiste para auditoría y no se envía a Graph. */
+  @IsOptional()
+  @IsIn(['tibio', 'caliente'])
+  temperature?: 'tibio' | 'caliente';
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @IsString({ each: true })
+  evidence_labels?: string[];
+
+  @IsOptional()
+  @IsIn(['crm_persisted_evaluation'])
+  qualification_source?: 'crm_persisted_evaluation';
+
+  /** Linaje informativo; no reutiliza la identidad de LeadSubmitted. */
+  @IsOptional()
+  @IsUUID('4')
+  initial_lead_submitted_event_id?: string;
+
   @Transform(({ value }) => value === true || value === 'true' || value === 1)
   @IsBoolean()
   ads_consent!: boolean;
 }
-

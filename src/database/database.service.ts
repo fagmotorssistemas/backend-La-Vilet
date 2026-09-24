@@ -77,6 +77,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     opts?: {
       excludeSchedule?: boolean;
       excludeLeadSubmitted?: boolean;
+      excludeQualifiedLead?: boolean;
       excludePurchase?: boolean;
     },
   ): OutboxRow[] {
@@ -91,13 +92,70 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     return this.store.markSent(id, metaResponseRedacted);
   }
 
+  markSentAndQueueResult(
+    id: number,
+    metaResponseRedacted: unknown,
+    syncPayload: Record<string, unknown>,
+  ): boolean {
+    return this.store.markSentAndQueueResult(
+      id,
+      metaResponseRedacted,
+      syncPayload,
+    );
+  }
+
   markRetry(
     id: number,
     error: string,
     nextAttemptAt: string,
     dead: boolean,
+    deliveryOutcome?: 'transport_failed' | 'meta_rejected' | 'meta_unverified',
+    metaResponseRedacted?: unknown,
   ): boolean {
-    return this.store.markRetry(id, error, nextAttemptAt, dead);
+    return this.store.markRetry(
+      id,
+      error,
+      nextAttemptAt,
+      dead,
+      deliveryOutcome,
+      metaResponseRedacted,
+    );
+  }
+
+  markRetryAndQueueResult(
+    id: number,
+    error: string,
+    nextAttemptAt: string,
+    dead: boolean,
+    deliveryOutcome: 'transport_failed' | 'meta_rejected' | 'meta_unverified',
+    metaResponseRedacted: unknown,
+    syncPayload: Record<string, unknown>,
+  ): boolean {
+    return this.store.markRetryAndQueueResult(
+      id,
+      error,
+      nextAttemptAt,
+      dead,
+      deliveryOutcome,
+      metaResponseRedacted,
+      syncPayload,
+    );
+  }
+
+  claimMetaResultSync(limit?: number) {
+    return this.store.claimMetaResultSync(limit);
+  }
+
+  markMetaResultSynced(id: number) {
+    return this.store.markMetaResultSynced(id);
+  }
+
+  markMetaResultSyncRetry(id: number, error: string, nextAttemptAt: string) {
+    return this.store.markMetaResultSyncRetry(id, error, nextAttemptAt);
+  }
+
+  countsMetaResultSync() {
+    return this.store.countsMetaResultSync();
   }
 
   getOutboxById(id: number) {
@@ -130,6 +188,10 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
 
   countsByStatus(): Record<string, number> {
     return this.store.countsByStatus();
+  }
+
+  deliveryBreakdown() {
+    return this.store.deliveryBreakdown();
   }
 
   purgeOld(retentionDays: number) {

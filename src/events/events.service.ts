@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   InternalServerErrorException,
   NotFoundException,
@@ -49,12 +50,17 @@ export type NestEventLookupResponse = {
    * - insufficient_evidence / unknown en el resto
    */
   acceptance_tier:
-    | 'api_accepted'
-    | 'api_rejected'
-    | 'insufficient_evidence'
-    | 'unknown';
+    'api_accepted' | 'api_rejected' | 'insufficient_evidence' | 'unknown';
   /** Alias explícito para el CRM: true solo con api_accepted. */
   api_accepted: boolean;
+  /** Estado operativo, separado de la evidencia Graph. */
+  delivery_outcome:
+    | 'backend_accepted'
+    | 'transport_failed'
+    | 'meta_rejected'
+    | 'meta_unverified'
+    | 'meta_accepted'
+    | 'cancelled';
 };
 
 @Injectable()
@@ -92,7 +98,9 @@ export class EventsService {
           >;
           metaResponse = {
             http_status:
-              typeof parsed.http_status === 'number' ? parsed.http_status : null,
+              typeof parsed.http_status === 'number'
+                ? parsed.http_status
+                : null,
             events_received:
               typeof parsed.events_received === 'number'
                 ? parsed.events_received
@@ -127,8 +135,13 @@ export class EventsService {
           fbtraceId: metaResponse.fbtrace_id,
         });
         acceptance_tier = evidence.tier;
-      } else if (row.status === 'dead' || row.status === 'failed') {
+      } else if (row.delivery_outcome === 'meta_rejected') {
         acceptance_tier = 'api_rejected';
+      } else if (
+        row.delivery_outcome === 'transport_failed' ||
+        row.delivery_outcome === 'meta_unverified'
+      ) {
+        acceptance_tier = 'insufficient_evidence';
       } else if (row.status === 'sent' && !metaResponse) {
         acceptance_tier = 'insufficient_evidence';
       }
@@ -149,6 +162,7 @@ export class EventsService {
         meta_response: metaResponse,
         acceptance_tier,
         api_accepted: acceptance_tier === 'api_accepted',
+        delivery_outcome: normalizeDeliveryOutcome(row),
       };
     } catch (error) {
       if (
@@ -173,6 +187,26 @@ export class EventsService {
       throw new BadRequestException('ads_consent requerido y debe ser true');
     }
 
+    if (
+      dto.event_name === 'LeadSubmitted' ||
+      dto.event_name === 'QualifiedLead'
+    ) {
+      if (dto.action_source !== 'business_messaging') {
+        throw new BadRequestException(
+          dto.event_name === 'LeadSubmitted'
+            ? 'lead_submitted_requires_business_messaging'
+            : 'qualified_lead_requires_business_messaging',
+        );
+      }
+      if (dto.messaging_channel !== 'whatsapp') {
+        throw new BadRequestException(
+          dto.event_name === 'LeadSubmitted'
+            ? 'lead_submitted_requires_whatsapp_channel'
+            : 'qualified_lead_requires_whatsapp_channel',
+        );
+      }
+    }
+
     if (dto.action_source === 'business_messaging') {
       // Schedule WhatsApp: Meta BM no admite event_name Schedule (docs CAPI BM;
       // Graph 2804066). No renombrar ni remapear a website.
@@ -181,14 +215,8 @@ export class EventsService {
           'business_messaging_schedule_not_supported_by_meta',
         );
       }
-      if (
-        dto.event_name === 'AddToWishlist' ||
-        dto.event_name === 'Purchase' ||
-        dto.event_name === 'ViewContent'
-      ) {
-        throw new BadRequestException(
-          'business_messaging_website_events_not_allowed',
-        );
+      if (!['LeadSubmitted', 'QualifiedLead'].includes(dto.event_name)) {
+        throw new BadRequestException('business_messaging_lead_submitted_only');
       }
       const dataset = String(dto.messaging_dataset_id || '').trim();
       const ctwa = String(dto.ctwa_clid || '').trim();
@@ -208,6 +236,42 @@ export class EventsService {
         throw new BadRequestException(
           'business_messaging_dataset_must_not_be_web_pixel',
         );
+      }
+      if (!this.meta.messagingDatasetId || !this.meta.wabaId) {
+        throw new BadRequestException(
+          'business_messaging_destination_not_configured',
+        );
+      }
+      if (dataset !== this.meta.messagingDatasetId) {
+        throw new BadRequestException(
+          'business_messaging_dataset_destination_mismatch',
+        );
+      }
+      if (waba !== this.meta.wabaId) {
+        throw new BadRequestException('business_messaging_waba_mismatch');
+      }
+    }
+
+    if (dto.event_name === 'QualifiedLead') {
+      if (
+        !dto.lead_id ||
+        !dto.tenant_id ||
+        !dto.project_id ||
+        !dto.contact_id
+      ) {
+        throw new BadRequestException('qualified_lead_scope_required');
+      }
+      if (!dto.temperature) {
+        throw new BadRequestException('qualified_lead_level_required');
+      }
+      if (!dto.evidence_labels?.length) {
+        throw new BadRequestException('qualified_lead_reasons_required');
+      }
+      if (dto.qualification_source !== 'crm_persisted_evaluation') {
+        throw new BadRequestException('qualified_lead_source_required');
+      }
+      if (dto.idempotency_key !== `wa_crm_qualified:${dto.lead_id}`) {
+        throw new BadRequestException('qualified_lead_idempotency_key_invalid');
       }
     }
 
@@ -344,6 +408,11 @@ export class EventsService {
         sale_id: saleId,
         sale_at: String(dto.sale_at || '').trim() || null,
         registered_at: String(dto.registered_at || '').trim() || null,
+        temperature: dto.temperature || null,
+        evidence_labels: dto.evidence_labels || null,
+        qualification_source: dto.qualification_source || null,
+        initial_lead_submitted_event_id:
+          dto.initial_lead_submitted_event_id || null,
       },
       graph_payload: built.payload,
       dataset_id: datasetForRow,
@@ -353,7 +422,40 @@ export class EventsService {
       ads_consent_required: true,
     });
 
-    const sendGate = this.meta.assertSendAllowed();
+    if (!result.inserted) {
+      let qualifiedLeadPayloadConflict = false;
+      if (dto.event_name === 'QualifiedLead') {
+        try {
+          const stored = JSON.parse(result.row.payload_redacted) as Record<
+            string,
+            unknown
+          >;
+          qualifiedLeadPayloadConflict =
+            stored.temperature !== dto.temperature ||
+            JSON.stringify(stored.evidence_labels || []) !==
+              JSON.stringify(dto.evidence_labels || []) ||
+            (stored.qualification_source || null) !==
+              (dto.qualification_source || null);
+        } catch {
+          qualifiedLeadPayloadConflict = true;
+        }
+      }
+      const conflicts =
+        result.row.event_name !== dto.event_name ||
+        result.row.delivery_lane !== deliveryLane ||
+        (dto.event_id != null && result.row.event_id !== dto.event_id) ||
+        (dto.event_time != null && result.row.event_time !== dto.event_time) ||
+        result.row.dataset_id !== datasetForRow ||
+        qualifiedLeadPayloadConflict;
+      if (conflicts) {
+        throw new ConflictException('idempotency_key_conflict');
+      }
+    }
+
+    const sendGate = this.meta.assertSendAllowedFor(
+      built.payload,
+      dto.event_name,
+    );
     const activeLane =
       this.meta.mode === 'test'
         ? 'test'
@@ -366,6 +468,11 @@ export class EventsService {
       delivery = 'cancelled:ads_consent_revoked';
     } else if (!sendGate.ok) {
       delivery = `held:${sendGate.reason}`;
+    } else if (
+      dto.event_name === 'QualifiedLead' &&
+      !this.meta.waCrmQualificationDeliveryEnabled
+    ) {
+      delivery = 'held:wa_crm_qualification_delivery_inactive';
     } else if (!activeLane || activeLane !== deliveryLane) {
       delivery = 'held:lane_mismatch';
     } else {
@@ -385,6 +492,24 @@ export class EventsService {
       mode: this.meta.mode,
       delivery,
       dataset_id: datasetForRow,
+      delivery_outcome: normalizeDeliveryOutcome(result.row),
     };
   }
+}
+
+function normalizeDeliveryOutcome(row: {
+  status: string;
+  delivery_outcome?: string | null;
+}): NestEventLookupResponse['delivery_outcome'] {
+  if (row.status === 'cancelled') return 'cancelled';
+  const value = String(row.delivery_outcome || '').trim();
+  if (
+    value === 'transport_failed' ||
+    value === 'meta_rejected' ||
+    value === 'meta_unverified' ||
+    value === 'meta_accepted'
+  ) {
+    return value;
+  }
+  return 'backend_accepted';
 }

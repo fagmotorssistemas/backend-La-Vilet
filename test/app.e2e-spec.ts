@@ -52,7 +52,12 @@ describe('lavilet-meta-capi (e2e)', () => {
     const body = res.body as HealthBody;
     expect(body.ok).toBe(true);
     expect(body.mode).toBe('disabled');
-    expect(JSON.stringify(body)).not.toMatch(/EAAG|access_token|secret/i);
+    const serialized = JSON.stringify(body);
+    expect(serialized).not.toContain(secret);
+    expect(serialized).not.toContain(
+      String(process.env.META_WA_APP_SECRET || 'never'),
+    );
+    expect(serialized).not.toMatch(/EAAG|access_token/i);
   });
 
   it('rechaza sin secreto interno', async () => {

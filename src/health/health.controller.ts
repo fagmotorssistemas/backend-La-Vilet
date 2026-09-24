@@ -29,27 +29,33 @@ export class HealthController {
       wa_api_version: this.meta.waApiVersion,
       test_code_present: Boolean(this.meta.testEventCode),
       token_configured: Boolean(this.meta.accessToken),
-      wa_messaging_token_configured: Boolean(
-        this.meta.waMessagingAccessToken,
-      ),
+      wa_messaging_token_configured: Boolean(this.meta.waMessagingAccessToken),
       delivery_enabled: gate.ok,
       delivery_reason: gate.ok ? null : gate.reason,
       core_setup_conservative: this.meta.coreSetupConservative,
       purchase_delivery_enabled:
-        String(
-          this.config.get<string>('META_PURCHASE_DELIVERY_ENABLED') || '',
-        )
+        String(this.config.get<string>('META_PURCHASE_DELIVERY_ENABLED') || '')
           .trim()
           .toLowerCase() === 'true',
       purchase_activated_at:
         String(
           this.config.get<string>('META_PURCHASE_ACTIVATED_AT') || '',
         ).trim() || null,
+      wa_crm_qualification_delivery_enabled:
+        String(
+          this.config.get<string>(
+            'META_WA_CRM_QUALIFICATION_DELIVERY_ENABLED',
+          ) || '',
+        )
+          .trim()
+          .toLowerCase() === 'true',
       persistence: {
         database_path: this.db.databasePath,
       },
       outbox: {
         counts: this.db.countsByStatus(),
+        delivery_by_event_channel_dataset: this.db.deliveryBreakdown(),
+        result_sync_counts: this.db.countsMetaResultSync(),
         worker: this.outbox.workerStatus,
       },
       supabase_drain: this.drain.status,

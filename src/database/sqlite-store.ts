@@ -3,12 +3,7 @@ import Database from 'better-sqlite3';
 export type DeliveryLane = 'test' | 'live';
 
 export type OutboxStatus =
-  | 'pending'
-  | 'processing'
-  | 'sent'
-  | 'failed'
-  | 'dead'
-  | 'cancelled';
+  'pending' | 'processing' | 'sent' | 'failed' | 'dead' | 'cancelled';
 
 export type OutboxRow = {
   id: number;
@@ -28,6 +23,22 @@ export type OutboxRow = {
   lead_id: string | null;
   ads_consent_required: number;
   meta_response_redacted: string | null;
+  delivery_outcome: string;
+  created_at: string;
+  updated_at: string;
+  sent_at: string | null;
+};
+
+export type MetaResultSyncRow = {
+  id: number;
+  outbox_event_id: number;
+  event_id: string;
+  stage: string;
+  payload_json: string;
+  status: 'pending' | 'sent';
+  attempt_count: number;
+  next_attempt_at: string;
+  last_error: string | null;
   created_at: string;
   updated_at: string;
   sent_at: string | null;
@@ -35,33 +46,33 @@ export type OutboxRow = {
 
 /** Recibo Cloud API WA: atribución CTWA + correlación CRM (sin cuerpo de mensaje). */
 export type WaCloudReceiptRow = {
-  wamid: string
-  wa_id_normalized: string | null
-  wa_id_raw: string
-  phone_number_id: string
-  waba_id: string
-  has_ctwa: number
-  ctwa_clid: string | null
-  referral_source_type: string | null
-  source_id: string | null
-  source_url: string | null
-  field_path: string | null
+  wamid: string;
+  wa_id_normalized: string | null;
+  wa_id_raw: string;
+  phone_number_id: string;
+  waba_id: string;
+  has_ctwa: number;
+  ctwa_clid: string | null;
+  referral_source_type: string | null;
+  source_id: string | null;
+  source_url: string | null;
+  field_path: string | null;
   /** Diagnóstico extracción: no_referral_object | clid_absent | clid_rejected | extracted */
-  ctwa_extract_status: string | null
-  referral_object_present: number
-  ctwa_clid_key_present: number
-  message_timestamp: string | null
-  link_status: string
-  lead_id: string | null
-  contact_id: string | null
-  kommo_id: number | null
-  tenant_id: string | null
-  project_id: string | null
-  supabase_synced: number
-  last_error: string | null
-  created_at: string
-  updated_at: string
-}
+  ctwa_extract_status: string | null;
+  referral_object_present: number;
+  ctwa_clid_key_present: number;
+  message_timestamp: string | null;
+  link_status: string;
+  lead_id: string | null;
+  contact_id: string | null;
+  kommo_id: number | null;
+  tenant_id: string | null;
+  project_id: string | null;
+  supabase_synced: number;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+};
 
 /** Capa SQLite sin Nest — testeable y usada por DatabaseService. */
 export class SqliteOutboxStore {
@@ -113,6 +124,25 @@ export class SqliteOutboxStore {
         updated_at TEXT NOT NULL,
         PRIMARY KEY (scope_type, scope_key)
       );
+
+      CREATE TABLE IF NOT EXISTS meta_result_sync_outbox (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        outbox_event_id INTEGER NOT NULL,
+        event_id TEXT NOT NULL,
+        stage TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at TEXT NOT NULL DEFAULT (datetime('now')),
+        last_error TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        sent_at TEXT,
+        UNIQUE(outbox_event_id, stage),
+        FOREIGN KEY(outbox_event_id) REFERENCES outbox_events(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_meta_result_sync_pending
+        ON meta_result_sync_outbox(status, next_attempt_at);
     `);
 
     this.db
@@ -146,6 +176,11 @@ export class SqliteOutboxStore {
         `ALTER TABLE outbox_events ADD COLUMN ads_consent_required INTEGER NOT NULL DEFAULT 1`,
       );
     }
+    if (!names.has('delivery_outcome')) {
+      this.db.exec(
+        `ALTER TABLE outbox_events ADD COLUMN delivery_outcome TEXT NOT NULL DEFAULT 'backend_accepted'`,
+      );
+    }
     this.db
       .prepare(
         `INSERT OR IGNORE INTO schema_migrations (id) VALUES ('003_delivery_lane')`,
@@ -167,7 +202,10 @@ export class SqliteOutboxStore {
       .prepare(`SELECT name FROM sqlite_master WHERE type='table'`)
       .all() as Array<{ name: string }>;
     const tableNames = new Set(tables.map((t) => t.name));
-    if (tableNames.has('consent_revocations') && tableNames.has('consent_state')) {
+    if (
+      tableNames.has('consent_revocations') &&
+      tableNames.has('consent_state')
+    ) {
       this.db.exec(`
         INSERT OR IGNORE INTO consent_state (scope_type, scope_key, ads_allowed, consent_version, updated_at)
         SELECT scope_type, scope_key, 0,
@@ -215,63 +253,68 @@ export class SqliteOutboxStore {
       .prepare(
         `INSERT OR IGNORE INTO schema_migrations (id) VALUES ('007_wa_cloud_message_receipts')`,
       )
-      .run()
+      .run();
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO schema_migrations (id) VALUES ('009_meta_result_sync_outbox')`,
+      )
+      .run();
 
     // Diagnóstico CTWA: distinguir no_referral_object vs clid_absent vs clid_rejected.
     // No almacena cuerpos ni valores de clid adicionales (ctwa_clid ya existía solo si extracted).
     const receiptCols = (
       this.db.prepare(`PRAGMA table_info(wa_cloud_message_receipts)`).all() as {
-        name: string
+        name: string;
       }[]
-    ).map((c) => c.name)
+    ).map((c) => c.name);
     if (!receiptCols.includes('ctwa_extract_status')) {
       this.db.exec(
         `ALTER TABLE wa_cloud_message_receipts ADD COLUMN ctwa_extract_status TEXT`,
-      )
+      );
     }
     if (!receiptCols.includes('referral_object_present')) {
       this.db.exec(
         `ALTER TABLE wa_cloud_message_receipts ADD COLUMN referral_object_present INTEGER NOT NULL DEFAULT 0`,
-      )
+      );
     }
     if (!receiptCols.includes('ctwa_clid_key_present')) {
       this.db.exec(
         `ALTER TABLE wa_cloud_message_receipts ADD COLUMN ctwa_clid_key_present INTEGER NOT NULL DEFAULT 0`,
-      )
+      );
     }
     if (!receiptCols.includes('message_timestamp')) {
       this.db.exec(
         `ALTER TABLE wa_cloud_message_receipts ADD COLUMN message_timestamp TEXT`,
-      )
+      );
     }
     this.db
       .prepare(
         `INSERT OR IGNORE INTO schema_migrations (id) VALUES ('008_wa_cloud_ctwa_extract_diag')`,
       )
-      .run()
+      .run();
   }
 
   insertWaCloudReceipt(input: {
-    wamid: string
-    waIdRaw: string
-    waIdNormalized: string | null
-    phoneNumberId: string
-    wabaId: string
-    hasCtwa: boolean
-    ctwaClid: string | null
-    referralSourceType: string | null
-    sourceId: string | null
-    sourceUrl: string | null
-    fieldPath: string | null
-    linkStatus: string
-    ctwaExtractStatus: string
-    referralObjectPresent: boolean
-    ctwaClidKeyPresent: boolean
-    messageTimestamp: string | null
+    wamid: string;
+    waIdRaw: string;
+    waIdNormalized: string | null;
+    phoneNumberId: string;
+    wabaId: string;
+    hasCtwa: boolean;
+    ctwaClid: string | null;
+    referralSourceType: string | null;
+    sourceId: string | null;
+    sourceUrl: string | null;
+    fieldPath: string | null;
+    linkStatus: string;
+    ctwaExtractStatus: string;
+    referralObjectPresent: boolean;
+    ctwaClidKeyPresent: boolean;
+    messageTimestamp: string | null;
   }): { inserted: boolean; row: WaCloudReceiptRow } {
-    const existing = this.getWaCloudReceipt(input.wamid)
+    const existing = this.getWaCloudReceipt(input.wamid);
     if (existing) {
-      return { inserted: false, row: existing }
+      return { inserted: false, row: existing };
     }
     this.db
       .prepare(
@@ -306,32 +349,32 @@ export class SqliteOutboxStore {
         referralObjectPresent: input.referralObjectPresent ? 1 : 0,
         ctwaClidKeyPresent: input.ctwaClidKeyPresent ? 1 : 0,
         messageTimestamp: input.messageTimestamp,
-      })
-    const row = this.getWaCloudReceipt(input.wamid)
+      });
+    const row = this.getWaCloudReceipt(input.wamid);
     if (!row) {
-      throw new Error('wa_receipt_insert_missing')
+      throw new Error('wa_receipt_insert_missing');
     }
-    return { inserted: true, row }
+    return { inserted: true, row };
   }
 
   getWaCloudReceipt(wamid: string): WaCloudReceiptRow | null {
     const row = this.db
       .prepare(`SELECT * FROM wa_cloud_message_receipts WHERE wamid = ?`)
-      .get(wamid) as WaCloudReceiptRow | undefined
-    return row || null
+      .get(wamid) as WaCloudReceiptRow | undefined;
+    return row || null;
   }
 
   updateWaCloudReceiptLink(
     wamid: string,
     patch: {
-      linkStatus: string
-      leadId?: string | null
-      contactId?: string | null
-      kommoId?: number | null
-      tenantId?: string | null
-      projectId?: string | null
-      supabaseSynced?: boolean
-      lastError?: string | null
+      linkStatus: string;
+      leadId?: string | null;
+      contactId?: string | null;
+      kommoId?: number | null;
+      tenantId?: string | null;
+      projectId?: string | null;
+      supabaseSynced?: boolean;
+      lastError?: string | null;
     },
   ): boolean {
     const result = this.db
@@ -363,8 +406,8 @@ export class SqliteOutboxStore {
               : 0
             : null,
         lastError: patch.lastError ?? null,
-      })
-    return result.changes > 0
+      });
+    return result.changes > 0;
   }
 
   listPendingWaCloudReceipts(limit = 50): WaCloudReceiptRow[] {
@@ -376,7 +419,7 @@ export class SqliteOutboxStore {
          ORDER BY created_at ASC
          LIMIT ?`,
       )
-      .all(Math.max(1, Math.min(200, limit))) as WaCloudReceiptRow[]
+      .all(Math.max(1, Math.min(200, limit))) as WaCloudReceiptRow[];
   }
 
   countsWaCloudReceipts(): Record<string, number> {
@@ -386,10 +429,10 @@ export class SqliteOutboxStore {
          FROM wa_cloud_message_receipts
          GROUP BY link_status`,
       )
-      .all() as Array<{ status: string; c: number }>
-    const out: Record<string, number> = {}
-    for (const row of rows) out[row.status] = row.c
-    return out
+      .all() as Array<{ status: string; c: number }>;
+    const out: Record<string, number> = {};
+    for (const row of rows) out[row.status] = row.c;
+    return out;
   }
 
   recoverStuckProcessing(): number {
@@ -413,11 +456,7 @@ export class SqliteOutboxStore {
       .run(nowIso).changes;
   }
 
-  tryAcquireLock(
-    lockName: string,
-    ownerId: string,
-    ttlMs: number,
-  ): boolean {
+  tryAcquireLock(lockName: string, ownerId: string, ttlMs: number): boolean {
     this.releaseExpiredLocks();
     const now = Date.now();
     const expires = new Date(now + Math.max(5_000, ttlMs)).toISOString();
@@ -432,11 +471,15 @@ export class SqliteOutboxStore {
       return true;
     } catch {
       const row = this.db
-        .prepare(`SELECT owner_id, expires_at FROM worker_locks WHERE lock_name = ?`)
+        .prepare(
+          `SELECT owner_id, expires_at FROM worker_locks WHERE lock_name = ?`,
+        )
         .get(lockName) as { owner_id: string; expires_at: string } | undefined;
       if (!row) return false;
       if (row.expires_at <= nowIso) {
-        this.db.prepare(`DELETE FROM worker_locks WHERE lock_name = ?`).run(lockName);
+        this.db
+          .prepare(`DELETE FROM worker_locks WHERE lock_name = ?`)
+          .run(lockName);
         try {
           this.db
             .prepare(
@@ -477,7 +520,13 @@ export class SqliteOutboxStore {
     const key = scopeKey.trim();
     if (!key) return 0;
     const now = new Date().toISOString();
-    const applied = this.applyConsentState(scopeType, key, false, consentVersion, now);
+    const applied = this.applyConsentState(
+      scopeType,
+      key,
+      false,
+      consentVersion,
+      now,
+    );
     if (!applied) return 0;
 
     const result = this.db
@@ -629,7 +678,8 @@ export class SqliteOutboxStore {
       const existing = this.db
         .prepare('SELECT * FROM outbox_events WHERE idempotency_key = ?')
         .get(input.idempotency_key) as OutboxRow | undefined;
-      if (existing) return { inserted: false, row: existing, blocked_by_consent: true };
+      if (existing)
+        return { inserted: false, row: existing, blocked_by_consent: true };
 
       this.db
         .prepare(
@@ -714,12 +764,14 @@ export class SqliteOutboxStore {
     opts?: {
       excludeSchedule?: boolean;
       excludeLeadSubmitted?: boolean;
+      excludeQualifiedLead?: boolean;
       excludePurchase?: boolean;
     },
   ): OutboxRow[] {
     const nowIso = new Date().toISOString();
     const excludeSchedule = opts?.excludeSchedule === true;
     const excludeLeadSubmitted = opts?.excludeLeadSubmitted === true;
+    const excludeQualifiedLead = opts?.excludeQualifiedLead === true;
     const excludePurchase = opts?.excludePurchase === true;
     const tx = this.db.transaction(() => {
       const rows = this.db
@@ -730,6 +782,7 @@ export class SqliteOutboxStore {
              AND (next_attempt_at IS NULL OR next_attempt_at <= @now)
              AND (@excludeSchedule = 0 OR event_name != 'Schedule')
              AND (@excludeLeadSubmitted = 0 OR event_name != 'LeadSubmitted')
+             AND (@excludeQualifiedLead = 0 OR event_name != 'QualifiedLead')
              AND (@excludePurchase = 0 OR event_name != 'Purchase')
            ORDER BY id ASC
            LIMIT @limit`,
@@ -740,6 +793,7 @@ export class SqliteOutboxStore {
           lane: deliveryLane,
           excludeSchedule: excludeSchedule ? 1 : 0,
           excludeLeadSubmitted: excludeLeadSubmitted ? 1 : 0,
+          excludeQualifiedLead: excludeQualifiedLead ? 1 : 0,
           excludePurchase: excludePurchase ? 1 : 0,
         }) as OutboxRow[];
 
@@ -830,6 +884,7 @@ export class SqliteOutboxStore {
              sent_at = datetime('now'),
              updated_at = datetime('now'),
              last_error = NULL,
+             delivery_outcome = 'meta_accepted',
              meta_response_redacted = @meta
          WHERE id = @id AND status = 'processing'`,
       )
@@ -837,17 +892,37 @@ export class SqliteOutboxStore {
     return result.changes === 1;
   }
 
+  markSentAndQueueResult(
+    id: number,
+    metaResponseRedacted: unknown,
+    syncPayload: Record<string, unknown>,
+  ): boolean {
+    return this.db.transaction(() => {
+      const changed = this.markSent(id, metaResponseRedacted);
+      if (!changed) return false;
+      this.queueMetaResultSync(id, 'meta_accepted', syncPayload);
+      return true;
+    })();
+  }
+
   markRetry(
     id: number,
     error: string,
     nextAttemptAt: string,
     dead: boolean,
+    deliveryOutcome:
+      | 'transport_failed'
+      | 'meta_rejected'
+      | 'meta_unverified' = 'transport_failed',
+    metaResponseRedacted?: unknown,
   ): boolean {
     const result = this.db
       .prepare(
         `UPDATE outbox_events
          SET status = @status,
              last_error = @error,
+             delivery_outcome = @deliveryOutcome,
+             meta_response_redacted = COALESCE(@meta, meta_response_redacted),
              next_attempt_at = @next,
              updated_at = datetime('now')
          WHERE id = @id AND status = 'processing'`,
@@ -857,8 +932,119 @@ export class SqliteOutboxStore {
         status: dead ? 'dead' : 'failed',
         error: error.slice(0, 500),
         next: nextAttemptAt,
+        deliveryOutcome,
+        meta:
+          metaResponseRedacted == null
+            ? null
+            : JSON.stringify(metaResponseRedacted),
       });
     return result.changes === 1;
+  }
+
+  markRetryAndQueueResult(
+    id: number,
+    error: string,
+    nextAttemptAt: string,
+    dead: boolean,
+    deliveryOutcome: 'transport_failed' | 'meta_rejected' | 'meta_unverified',
+    metaResponseRedacted: unknown,
+    syncPayload: Record<string, unknown>,
+  ): boolean {
+    return this.db.transaction(() => {
+      const changed = this.markRetry(
+        id,
+        error,
+        nextAttemptAt,
+        dead,
+        deliveryOutcome,
+        metaResponseRedacted,
+      );
+      if (!changed) return false;
+      this.queueMetaResultSync(id, deliveryOutcome, syncPayload);
+      return true;
+    })();
+  }
+
+  queueMetaResultSync(
+    outboxEventId: number,
+    stage: string,
+    payload: Record<string, unknown>,
+  ): void {
+    const event = this.getOutboxById(outboxEventId);
+    if (!event) throw new Error('result_sync_event_missing');
+    this.db
+      .prepare(
+        `INSERT INTO meta_result_sync_outbox (
+           outbox_event_id, event_id, stage, payload_json, status, next_attempt_at
+         ) VALUES (?, ?, ?, ?, 'pending', datetime('now'))
+         ON CONFLICT(outbox_event_id, stage) DO UPDATE SET
+           payload_json = excluded.payload_json,
+           status = 'pending',
+           next_attempt_at = datetime('now'),
+           last_error = NULL,
+           updated_at = datetime('now')`,
+      )
+      .run(outboxEventId, event.event_id, stage, JSON.stringify(payload));
+  }
+
+  claimMetaResultSync(limit = 20): MetaResultSyncRow[] {
+    return this.db.transaction(() => {
+      const rows = this.db
+        .prepare(
+          `SELECT * FROM meta_result_sync_outbox
+           WHERE status = 'pending' AND next_attempt_at <= datetime('now')
+           ORDER BY id ASC LIMIT ?`,
+        )
+        .all(Math.max(1, Math.min(100, limit))) as MetaResultSyncRow[];
+      for (const row of rows) {
+        this.db
+          .prepare(
+            `UPDATE meta_result_sync_outbox
+             SET attempt_count = attempt_count + 1, updated_at = datetime('now')
+             WHERE id = ? AND status = 'pending'`,
+          )
+          .run(row.id);
+        row.attempt_count += 1;
+      }
+      return rows;
+    })();
+  }
+
+  markMetaResultSynced(id: number): boolean {
+    return (
+      this.db
+        .prepare(
+          `UPDATE meta_result_sync_outbox
+           SET status='sent', sent_at=datetime('now'), updated_at=datetime('now'), last_error=NULL
+           WHERE id=? AND status='pending'`,
+        )
+        .run(id).changes === 1
+    );
+  }
+
+  markMetaResultSyncRetry(
+    id: number,
+    error: string,
+    nextAttemptAt: string,
+  ): boolean {
+    return (
+      this.db
+        .prepare(
+          `UPDATE meta_result_sync_outbox
+           SET last_error=?, next_attempt_at=?, updated_at=datetime('now')
+           WHERE id=? AND status='pending'`,
+        )
+        .run(error.slice(0, 300), nextAttemptAt, id).changes === 1
+    );
+  }
+
+  countsMetaResultSync(): Record<string, number> {
+    const rows = this.db
+      .prepare(
+        `SELECT status, COUNT(*) c FROM meta_result_sync_outbox GROUP BY status`,
+      )
+      .all() as Array<{ status: string; c: number }>;
+    return Object.fromEntries(rows.map((row) => [row.status, row.c]));
   }
 
   cancelProcessingIfRevoked(id: number): boolean {
@@ -923,7 +1109,10 @@ export class SqliteOutboxStore {
   cancelByEventIds(
     eventIds: string[],
     reason = 'core_setup_hold',
-  ): { updated: number; rows: Array<{ id: number; event_id: string; status: string }> } {
+  ): {
+    updated: number;
+    rows: Array<{ id: number; event_id: string; status: string }>;
+  } {
     const ids = [...new Set(eventIds.map((e) => e.trim()).filter(Boolean))];
     if (!ids.length) return { updated: 0, rows: [] };
 
@@ -958,6 +1147,80 @@ export class SqliteOutboxStore {
     const out: Record<string, number> = {};
     for (const row of rows) out[row.status] = row.c;
     return out;
+  }
+
+  deliveryBreakdown(): Array<{
+    event_name: string;
+    channel: string;
+    dataset_id: string;
+    delivery_lane: string;
+    status: string;
+    delivery_outcome: string;
+    window: 'all' | 'last_7d';
+    count: number;
+  }> {
+    const rows = this.db
+      .prepare(
+        `SELECT event_name, dataset_id, delivery_lane, status, delivery_outcome,
+              graph_payload, event_time
+       FROM outbox_events`,
+      )
+      .all() as Array<Record<string, unknown>>;
+    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const groups = new Map<
+      string,
+      {
+        event_name: string;
+        channel: string;
+        dataset_id: string;
+        delivery_lane: string;
+        status: string;
+        delivery_outcome: string;
+        window: 'all' | 'last_7d';
+        count: number;
+      }
+    >();
+    const add = (row: Record<string, unknown>, window: 'all' | 'last_7d') => {
+      let channel = 'unknown';
+      try {
+        const graphPayload =
+          typeof row.graph_payload === 'string' ? row.graph_payload : '{}';
+        const graph = JSON.parse(graphPayload) as {
+          data?: Array<Record<string, unknown>>;
+        };
+        const first = graph.data?.[0];
+        const rawChannel = first?.messaging_channel ?? first?.action_source;
+        channel = typeof rawChannel === 'string' ? rawChannel : 'unknown';
+      } catch {
+        /* redacted operational grouping only */
+      }
+      const item = {
+        event_name: String(row.event_name),
+        channel,
+        dataset_id: String(row.dataset_id),
+        delivery_lane: String(row.delivery_lane),
+        status: String(row.status),
+        delivery_outcome: String(row.delivery_outcome),
+        window,
+        count: 0,
+      };
+      const key = JSON.stringify(item);
+      const found = groups.get(key);
+      if (found) found.count += 1;
+      else groups.set(key, { ...item, count: 1 });
+    };
+    for (const row of rows) {
+      add(row, 'all');
+      const happenedAt = Number(row.event_time) * 1000;
+      if (
+        Number.isFinite(happenedAt) &&
+        happenedAt >= cutoff &&
+        happenedAt <= Date.now()
+      ) {
+        add(row, 'last_7d');
+      }
+    }
+    return [...groups.values()];
   }
 
   purgeOld(retentionDays: number) {

@@ -21,15 +21,17 @@ describe('WA messaging credential lane', () => {
 
   it('LeadSubmitted POSTea con Bearer WA y no el web', async () => {
     const authHeaders: string[] = [];
-    global.fetch = jest.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      const headers = init?.headers as Record<string, string>;
-      authHeaders.push(String(headers?.Authorization || ''));
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({ events_received: 1, fbtrace_id: 'WA_MOCK' }),
-      } as Response;
-    }) as typeof fetch;
+    global.fetch = jest.fn(
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const headers = init?.headers as Record<string, string>;
+        authHeaders.push(String(headers?.Authorization || ''));
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ events_received: 1, fbtrace_id: 'WA_MOCK' }),
+        } as Response;
+      },
+    ) as typeof fetch;
 
     const meta = makeMeta({
       META_MODE: 'test',
@@ -68,15 +70,17 @@ describe('WA messaging credential lane', () => {
 
   it('website Lead POSTea con Bearer web y META_API_VERSION', async () => {
     const authHeaders: string[] = [];
-    global.fetch = jest.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      const headers = init?.headers as Record<string, string>;
-      authHeaders.push(String(headers?.Authorization || ''));
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({ events_received: 1, fbtrace_id: 'WEB_MOCK' }),
-      } as Response;
-    }) as typeof fetch;
+    global.fetch = jest.fn(
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const headers = init?.headers as Record<string, string>;
+        authHeaders.push(String(headers?.Authorization || ''));
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ events_received: 1, fbtrace_id: 'WEB_MOCK' }),
+        } as Response;
+      },
+    ) as typeof fetch;
 
     const meta = makeMeta({
       META_MODE: 'test',
@@ -122,6 +126,19 @@ describe('WA messaging credential lane', () => {
     );
     expect(send.ok).toBe(false);
     expect(send.errorMessage).toBe('Falta META_WA_CAPI_ACCESS_TOKEN');
+    expect(
+      meta.assertSendAllowedFor(
+        {
+          data: [
+            {
+              event_name: 'LeadSubmitted',
+              action_source: 'business_messaging',
+            },
+          ],
+        },
+        'LeadSubmitted',
+      ),
+    ).toEqual({ ok: false, reason: 'Falta META_WA_CAPI_ACCESS_TOKEN' });
     expect(global.fetch).not.toHaveBeenCalled();
   });
 });

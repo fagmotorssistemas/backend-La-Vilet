@@ -1,6 +1,6 @@
 # Compose file format 3.8 — compatible con docker-compose 1.29.2
 # Desarrollo / Droplet local. En App Platform usar Dockerfile + volumen /data.
-version: "3.8"
+version: '3.8'
 
 services:
   lavilet-meta-capi:
@@ -8,7 +8,7 @@ services:
     image: lavilet-meta-capi:local
     ports:
       # Solo loopback en el host (no exponer 0.0.0.0). App Platform usa el Dockerfile.
-      - "127.0.0.1:${PORT:-3010}:3010"
+      - '127.0.0.1:${PORT:-3010}:3010'
     environment:
       PORT: 3010
       META_MODE: ${META_MODE:-disabled}
@@ -20,11 +20,13 @@ services:
       # Token WA BM (LeadSubmitted). Distinto del token web; no reutilizar META_CAPI_ACCESS_TOKEN.
       META_WA_CAPI_ACCESS_TOKEN: ${META_WA_CAPI_ACCESS_TOKEN:-}
       META_WA_LEAD_SUBMITTED_DELIVERY_ENABLED: ${META_WA_LEAD_SUBMITTED_DELIVERY_ENABLED:-false}
+      META_WA_CRM_QUALIFICATION_DELIVERY_ENABLED: ${META_WA_CRM_QUALIFICATION_DELIVERY_ENABLED:-false}
       META_WA_CLOUD_WEBHOOK_CHALLENGE_ENABLED: ${META_WA_CLOUD_WEBHOOK_CHALLENGE_ENABLED:-false}
       META_WA_CLOUD_WEBHOOK_RECEIVE_ENABLED: ${META_WA_CLOUD_WEBHOOK_RECEIVE_ENABLED:-false}
       META_WA_VERIFY_TOKEN: ${META_WA_VERIFY_TOKEN:-}
       META_WA_APP_SECRET: ${META_WA_APP_SECRET:-}
       META_WABA_ID: ${META_WABA_ID:-}
+      META_MESSAGING_DATASET_ID: ${META_MESSAGING_DATASET_ID:-}
       META_WA_PHONE_NUMBER_ID: ${META_WA_PHONE_NUMBER_ID:-}
       META_WA_CTWA_RECONCILE_ENABLED: ${META_WA_CTWA_RECONCILE_ENABLED:-true}
       META_WA_CTWA_RECONCILE_POLL_MS: ${META_WA_CTWA_RECONCILE_POLL_MS:-30000}
@@ -54,9 +56,9 @@ services:
     healthcheck:
       test:
         [
-          "CMD",
-          "node",
-          "-e",
+          'CMD',
+          'node',
+          '-e',
           "fetch('http://127.0.0.1:3010/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
         ]
       interval: 30s

@@ -18,6 +18,7 @@ export type MetaEventName =
   | 'Lead'
   | 'Schedule'
   | 'LeadSubmitted'
+  | 'QualifiedLead'
   | 'AddToWishlist'
   | 'Purchase';
 
@@ -26,11 +27,7 @@ export type BuildGraphInput = {
   eventId?: string;
   eventTime?: number;
   actionSource:
-    | 'website'
-    | 'system_generated'
-    | 'business_messaging'
-    | 'other'
-    | 'chat';
+    'website' | 'system_generated' | 'business_messaging' | 'other' | 'chat';
   eventSourceUrl?: string | null;
   match?: MatchInput;
   fbp?: string | null;
@@ -81,14 +78,12 @@ export class MetaCapiService {
   }
 
   /**
-   * Versión Graph para BM / LeadSubmitted.
+   * Versión Graph para BM / LeadSubmitted / QualifiedLead.
    * Evidencia local: POST dataset mensajería falló en v21 y aceptó en v26;
    * no altera META_API_VERSION del CAPI web.
    */
   get waApiVersion(): string {
-    return (
-      this.config.get<string>('META_WA_API_VERSION')?.trim() || 'v26.0'
-    );
+    return this.config.get<string>('META_WA_API_VERSION')?.trim() || 'v26.0';
   }
 
   /** Token CAPI web (pixel/dataset website). Nunca usar para BM WhatsApp. */
@@ -99,13 +94,34 @@ export class MetaCapiService {
   }
 
   /**
-   * Token CAPI business messaging (LeadSubmitted / WhatsApp).
+   * Token CAPI business messaging (LeadSubmitted / QualifiedLead / WhatsApp).
    * Separado del web; scopes WA (`whatsapp_business_manage_events`, etc.).
    */
   get waMessagingAccessToken(): string {
     return String(
       this.config.get<string>('META_WA_CAPI_ACCESS_TOKEN') || '',
     ).trim();
+  }
+
+  /** Destino autorizado para LeadSubmitted; nunca se toma del payload como configuración. */
+  get messagingDatasetId(): string {
+    return String(
+      this.config.get<string>('META_MESSAGING_DATASET_ID') || '',
+    ).trim();
+  }
+
+  get wabaId(): string {
+    return String(this.config.get<string>('META_WABA_ID') || '').trim();
+  }
+
+  get waCrmQualificationDeliveryEnabled(): boolean {
+    const value = String(
+      this.config.get<string>('META_WA_CRM_QUALIFICATION_DELIVERY_ENABLED') ||
+        '',
+    )
+      .trim()
+      .toLowerCase();
+    return value === 'true' || value === '1';
   }
 
   get testEventCode(): string | null {
@@ -129,12 +145,19 @@ export class MetaCapiService {
    * - live: requiere token y PROHÍBE test code activo
    */
   assertSendAllowed(): { ok: true } | { ok: false; reason: string } {
+    const modeGate = this.assertModeAllowed();
+    if (!modeGate.ok) return modeGate;
+    if (!this.accessToken) {
+      return { ok: false, reason: 'Falta META_CAPI_ACCESS_TOKEN' };
+    }
+    return { ok: true };
+  }
+
+  /** Valida carril test/live sin acoplarlo a una credencial concreta. */
+  assertModeAllowed(): { ok: true } | { ok: false; reason: string } {
     const mode = this.mode;
     if (mode === 'disabled') {
       return { ok: false, reason: 'META_MODE=disabled' };
-    }
-    if (!this.accessToken) {
-      return { ok: false, reason: 'Falta META_CAPI_ACCESS_TOKEN' };
     }
     if (mode === 'live' && this.testEventCode) {
       return {
@@ -147,6 +170,25 @@ export class MetaCapiService {
       return {
         ok: false,
         reason: 'META_MODE=test requiere META_TEST_EVENT_CODE',
+      };
+    }
+    return { ok: true };
+  }
+
+  assertSendAllowedFor(
+    payload: Record<string, unknown>,
+    eventName?: string | null,
+  ): { ok: true } | { ok: false; reason: string } {
+    const modeGate = this.assertModeAllowed();
+    if (!modeGate.ok) return modeGate;
+    const lane = this.resolveGraphCredentialLane(payload, eventName);
+    if (!this.tokenForCredentialLane(lane)) {
+      return {
+        ok: false,
+        reason:
+          lane === 'whatsapp_messaging'
+            ? 'Falta META_WA_CAPI_ACCESS_TOKEN'
+            : 'Falta META_CAPI_ACCESS_TOKEN',
       };
     }
     return { ok: true };
@@ -188,7 +230,10 @@ export class MetaCapiService {
       value?: unknown;
       currency?: unknown;
     } | null> = events.map((ev) => {
-      if (String(ev?.event_name || '') !== 'Purchase') return null;
+      if (
+        (typeof ev?.event_name === 'string' ? ev.event_name : '') !== 'Purchase'
+      )
+        return null;
       const cd =
         ev.custom_data && typeof ev.custom_data === 'object'
           ? (ev.custom_data as Record<string, unknown>)
@@ -268,7 +313,8 @@ export class MetaCapiService {
     if (!conservative) {
       if (input.contentIds?.length) custom.content_ids = input.contentIds;
       if (input.contentName) custom.content_name = input.contentName;
-      if (input.contentCategory) custom.content_category = input.contentCategory;
+      if (input.contentCategory)
+        custom.content_category = input.contentCategory;
     }
     // Purchase: Meta docs — value + currency required. Conservar aunque Core Setup
     // strippee content_*; nunca inventar currency/value aquí (validados en enqueue).
@@ -319,8 +365,8 @@ export class MetaCapiService {
       content_ids: conservative ? null : input.contentIds || null,
       content_name: conservative ? null : input.contentName || null,
       content_category: conservative ? null : input.contentCategory || null,
-      value: isPurchase ? input.value ?? null : null,
-      currency: isPurchase ? input.currency ?? null : null,
+      value: isPurchase ? (input.value ?? null) : null,
+      currency: isPurchase ? (input.currency ?? null) : null,
       core_setup_conservative: conservative,
       test_mode: this.mode === 'test',
     };
@@ -336,7 +382,11 @@ export class MetaCapiService {
     payload: Record<string, unknown>,
     eventName?: string | null,
   ): 'web' | 'whatsapp_messaging' {
-    if (String(eventName || '').trim() === 'LeadSubmitted') {
+    if (
+      ['LeadSubmitted', 'QualifiedLead'].includes(
+        String(eventName || '').trim(),
+      )
+    ) {
       return 'whatsapp_messaging';
     }
     const data = payload?.data;
@@ -345,7 +395,10 @@ export class MetaCapiService {
       if (first?.action_source === 'business_messaging') {
         return 'whatsapp_messaging';
       }
-      if (first?.event_name === 'LeadSubmitted') {
+      if (
+        typeof first?.event_name === 'string' &&
+        ['LeadSubmitted', 'QualifiedLead'].includes(first.event_name)
+      ) {
         return 'whatsapp_messaging';
       }
     }

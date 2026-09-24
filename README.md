@@ -17,13 +17,15 @@ Navegador ──► Next.js (Vercel) /api/meta/* ── secreto ──► lavile
 
 Guía completa de despliegue y migración de variables: [`docs/DEPLOY_DIGITALOCEAN.md`](docs/DEPLOY_DIGITALOCEAN.md).
 
+Contrato conciliado frontend/backend: [`docs/CAPI_CONTRACT_FINAL.md`](docs/CAPI_CONTRACT_FINAL.md).
+
 ## Modos
 
-| `META_MODE` | Comportamiento |
-|---|---|
-| `disabled` (default) | Encola; **no** llama a Graph |
-| `test` | Envía con `META_TEST_EVENT_CODE` |
-| `live` | Producción. **Bloqueado** si el test code sigue definido |
+| `META_MODE`          | Comportamiento                                           |
+| -------------------- | -------------------------------------------------------- |
+| `disabled` (default) | Encola; **no** llama a Graph                             |
+| `test`               | Envía con `META_TEST_EVENT_CODE`                         |
+| `live`               | Producción. **Bloqueado** si el test code sigue definido |
 
 ## Cola persistente
 
@@ -34,10 +36,10 @@ Guía completa de despliegue y migración de variables: [`docs/DEPLOY_DIGITALOCE
 
 ## API
 
-| Método | Ruta | Auth |
-|---|---|---|
-| GET | `/api/health` | Pública (sin secretos) |
-| POST | `/api/v1/events` | `X-Internal-Secret` o `Bearer` |
+| Método | Ruta             | Auth                           |
+| ------ | ---------------- | ------------------------------ |
+| GET    | `/api/health`    | Pública (sin secretos)         |
+| POST   | `/api/v1/events` | `X-Internal-Secret` o `Bearer` |
 
 ## Desarrollo local
 
@@ -60,9 +62,9 @@ Volumen obligatorio: `/data` (persistencia outbox).
 
 ## Activación segura (resumen)
 
-1. DO con `META_MODE=disabled` + volumen `/data` + health OK  
-2. Vercel con URL del backend + secreto compartido; quitar token/dataset/test del front  
-3. `test` → verificar Events Manager → quitar test code → `live`  
+1. DO con `META_MODE=disabled` + volumen `/data` + health OK
+2. Vercel con URL del backend + secreto compartido; quitar token/dataset/test del front
+3. `test` → verificar Events Manager → quitar test code → `live`
 4. Rollback: `META_MODE=disabled`
 
 ## Restricciones

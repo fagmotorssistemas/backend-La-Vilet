@@ -1,0 +1,58 @@
+name: lavilet-capi-qualified-lead-test
+
+services:
+  qualified-lead-test:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: lavilet-meta-capi:qualified-lead-test-local
+    ports:
+      - '127.0.0.1:${QL_TEST_HOST_PORT:-3110}:3010'
+    environment:
+      PORT: 3010
+      META_MODE: ${META_MODE:-disabled}
+      META_DATASET_ID: ${META_DATASET_ID:-}
+      META_API_VERSION: ${META_API_VERSION:-v21.0}
+      META_WA_API_VERSION: ${META_WA_API_VERSION:-v26.0}
+      META_CAPI_ACCESS_TOKEN: ''
+      META_WA_CAPI_ACCESS_TOKEN: ${META_WA_CAPI_ACCESS_TOKEN:-}
+      META_TEST_EVENT_CODE: ${META_TEST_EVENT_CODE:-}
+      META_CAPI_INTERNAL_SECRET: ${META_CAPI_INTERNAL_SECRET:?required}
+      META_WABA_ID: ${META_WABA_ID:?required}
+      META_MESSAGING_DATASET_ID: ${META_MESSAGING_DATASET_ID:?required}
+      DATABASE_PATH: /qualified-lead-test/qualified-lead-test.db
+      OUTBOX_ENABLED: 'true'
+      OUTBOX_POLL_MS: 1000
+      OUTBOX_BATCH_SIZE: 1
+      OUTBOX_MAX_ATTEMPTS: 1
+      OUTBOX_RETENTION_DAYS: 7
+      META_HTTP_TIMEOUT_MS: 10000
+      SUPABASE_DRAIN_ENABLED: 'false'
+      SUPABASE_URL: ''
+      SUPABASE_SERVICE_ROLE_KEY: ''
+      META_SCHEDULE_RECOVER_ENABLED: 'false'
+      META_SCHEDULE_DELIVERY_ENABLED: 'false'
+      META_WA_LEAD_SUBMITTED_DELIVERY_ENABLED: 'false'
+      META_WA_CRM_QUALIFICATION_DELIVERY_ENABLED: ${META_WA_CRM_QUALIFICATION_DELIVERY_ENABLED:-false}
+      META_PURCHASE_DELIVERY_ENABLED: 'false'
+      META_PURCHASE_ACTIVATED_AT: ''
+      META_WA_CLOUD_WEBHOOK_CHALLENGE_ENABLED: 'false'
+      META_WA_CLOUD_WEBHOOK_RECEIVE_ENABLED: 'false'
+      META_WA_CTWA_RECONCILE_ENABLED: 'false'
+      CORS_ORIGINS: http://127.0.0.1:${QL_TEST_HOST_PORT:-3110}
+    volumes:
+      - qualified_lead_test_data:/qualified-lead-test
+    restart: 'no'
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3010/api/health').then(r=>r.json()).then(j=>process.exit(j.ok&&j.mode==='test'&&!j.supabase_drain.enabled&&!j.wa_cloud_webhook.receive_enabled?0:1)).catch(()=>process.exit(1))"
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+volumes:
+  qualified_lead_test_data:
+    name: lavilet_capi_qualified_lead_test_data

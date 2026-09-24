@@ -11,11 +11,7 @@ import { EventsService } from '../events/events.service';
 import { MetaCapiService } from '../meta/meta-capi.service';
 import { decideWaLeadSubmittedConsentGate } from '../meta/wa-lead-submitted-consent-gate';
 import { decidePurchaseAnnulment } from '../meta/purchase-annulment-gate';
-import {
-  isPurchaseEligibleAfterActivation,
-  parseExistingTimestampMs,
-  parsePurchaseActivatedAtMs,
-} from '../meta/purchase-activation-cutover';
+import { evaluatePurchaseActivationGate } from '../meta/purchase-activation-cutover';
 
 type SupabaseOutboxRow = {
   id: string;
@@ -26,6 +22,7 @@ type SupabaseOutboxRow = {
     | 'Lead'
     | 'Schedule'
     | 'LeadSubmitted'
+    | 'QualifiedLead'
     | 'AddToWishlist'
     | 'Purchase';
   event_time: number;
@@ -87,9 +84,7 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
   }
 
   onModuleInit() {
-    const raw = String(
-      this.config.get<string>('SUPABASE_DRAIN_ENABLED') || '',
-    )
+    const raw = String(this.config.get<string>('SUPABASE_DRAIN_ENABLED') || '')
       .trim()
       .toLowerCase();
     const drainOn = raw === 'true' || raw === '1';
@@ -175,6 +170,16 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
           );
           continue;
         }
+        if (
+          row.event_name === 'QualifiedLead' &&
+          !this.isWaCrmQualificationDeliveryEnabled()
+        ) {
+          skipped += 1;
+          this.logger.log(
+            `drain skip wa_crm_qualification_delivery_inactive event_id=${row.event_id}`,
+          );
+          continue;
+        }
         // Purchase: tipado; envío solo con flag + corte de activación.
         if (
           row.event_name === 'Purchase' &&
@@ -186,20 +191,38 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
           );
           continue;
         }
-        if (
-          row.event_name === 'Purchase' &&
-          this.isPurchaseDeliveryEnabled() &&
-          !this.isPurchaseRowWithinCutover(row)
-        ) {
+        const purchaseActivation =
+          row.event_name === 'Purchase' && this.isPurchaseDeliveryEnabled()
+            ? this.purchaseRowActivationGate(row)
+            : { ok: true as const };
+        if (!purchaseActivation.ok) {
           skipped += 1;
+          await this.markSupabase(row.id, 'pending', purchaseActivation.reason);
           this.logger.log(
-            `drain skip purchase_before_activation_cutover event_id=${row.event_id}`,
+            `drain skip ${purchaseActivation.reason} event_id=${row.event_id}`,
           );
           continue;
         }
         // review_hold histórico (wishlist/purchase captura previa): no drenar.
         // Solo pending llega aquí; defensa ya cubierta arriba.
-        const outcome = await this.forwardRow(row);
+        let outcome: 'forwarded' | 'cancelled' | 'failed' | 'skipped';
+        try {
+          outcome = await this.forwardRow(row);
+        } catch (error) {
+          outcome = 'failed';
+          const reason =
+            error instanceof Error
+              ? error.message.slice(0, 120)
+              : 'drain_row_error';
+          try {
+            await this.markSupabase(row.id, 'pending', reason);
+          } catch {
+            // La fila sigue pending; el siguiente tick reintentará la sincronización.
+          }
+          this.logger.warn(
+            `drain row failed event_id=${row.event_id} reason=${reason}`,
+          );
+        }
         if (outcome === 'forwarded') forwarded += 1;
         else if (outcome === 'cancelled') cancelled += 1;
         else failed += 1;
@@ -243,12 +266,15 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
 
   private async drainConsentLedger() {
     const qs = new URLSearchParams({
-      select: 'id,visitor_key,lead_id,ads_consent,consent_version,nest_status,nest_attempts',
+      select:
+        'id,visitor_key,lead_id,ads_consent,consent_version,nest_status,nest_attempts',
       nest_status: 'in.(pending,failed)',
       order: 'consent_version.asc',
       limit: '20',
     });
-    const res = await this.supabaseFetch(`/rest/v1/meta_ads_consent_ledger?${qs}`);
+    const res = await this.supabaseFetch(
+      `/rest/v1/meta_ads_consent_ledger?${qs}`,
+    );
     if (!res.ok) {
       if (res.status !== 404) {
         this.logger.warn(`consent_ledger_fetch http=${res.status}`);
@@ -282,7 +308,9 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
         await this.markConsentLedger(
           row.id,
           'failed',
-          error instanceof Error ? error.message.slice(0, 200) : 'consent_drain_failed',
+          error instanceof Error
+            ? error.message.slice(0, 200)
+            : 'consent_drain_failed',
         );
       }
     }
@@ -327,6 +355,16 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
     return raw === 'true' || raw === '1';
   }
 
+  private isWaCrmQualificationDeliveryEnabled() {
+    const raw = String(
+      this.config.get<string>('META_WA_CRM_QUALIFICATION_DELIVERY_ENABLED') ||
+        '',
+    )
+      .trim()
+      .toLowerCase();
+    return raw === 'true' || raw === '1';
+  }
+
   private isPurchaseDeliveryEnabled() {
     const raw = String(
       this.config.get<string>('META_PURCHASE_DELIVERY_ENABLED') || '',
@@ -336,29 +374,25 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
     return raw === 'true' || raw === '1';
   }
 
-  private isPurchaseRowWithinCutover(row: SupabaseOutboxRow): boolean {
-    const cut = parsePurchaseActivatedAtMs(
-      this.config.get<string>('META_PURCHASE_ACTIVATED_AT'),
-    );
+  private purchaseRowActivationGate(row: SupabaseOutboxRow) {
     const payload = row.payload || {};
     const details =
       payload.details && typeof payload.details === 'object'
         ? (payload.details as Record<string, unknown>)
         : null;
-    const registeredMs = parseExistingTimestampMs(
+    const registeredAt =
       (typeof payload.registered_at === 'string' && payload.registered_at) ||
-        (typeof details?.registered_at === 'string' && details.registered_at) ||
-        null,
-    );
-    const saleAtMs = parseExistingTimestampMs(
+      (typeof details?.registered_at === 'string' && details.registered_at) ||
+      null;
+    const saleAt =
       (typeof payload.sale_at === 'string' && payload.sale_at) ||
-        (typeof details?.sale_at === 'string' && details.sale_at) ||
-        null,
-    );
-    return isPurchaseEligibleAfterActivation({
-      registeredAtMs: registeredMs,
-      commercialConfirmedAtMs: saleAtMs,
-      activatedAtMs: cut,
+      (typeof details?.sale_at === 'string' && details.sale_at) ||
+      null;
+    return evaluatePurchaseActivationGate({
+      registeredAt,
+      saleAt,
+      eventTime: row.event_time,
+      activatedAt: this.config.get<string>('META_PURCHASE_ACTIVATED_AT'),
     });
   }
 
@@ -513,9 +547,7 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
         if (ok) {
           promoted += 1;
         } else {
-          this.logger.log(
-            `promote_race_lost id=${row.id} (ya no review_hold)`,
-          );
+          this.logger.log(`promote_race_lost id=${row.id} (ya no review_hold)`);
         }
         if (promoted >= maxPromote) break;
       }
@@ -593,7 +625,10 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
     },
     lookbackDays: number,
   ): Promise<{ ok: true } | { ok: false; reason: string; cancel: boolean }> {
-    const action = String(row.payload?.action_source || '').toLowerCase();
+    const action =
+      typeof row.payload?.action_source === 'string'
+        ? row.payload.action_source.toLowerCase()
+        : '';
     if (action !== 'website') {
       return {
         ok: false,
@@ -611,7 +646,8 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
       };
     }
 
-    const appointment = await this.fetchAppointmentForSchedulePromote(appointmentId);
+    const appointment =
+      await this.fetchAppointmentForSchedulePromote(appointmentId);
     if (!appointment) {
       return {
         ok: false,
@@ -706,14 +742,19 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
     payload: Record<string, unknown> | null;
     idempotency_key: string;
   }): string | null {
-    const fromPayload = String(row.payload?.appointment_id || '').trim();
+    const fromPayload =
+      typeof row.payload?.appointment_id === 'string'
+        ? row.payload.appointment_id.trim()
+        : '';
     if (/^[0-9a-f-]{36}$/i.test(fromPayload)) return fromPayload;
     const key = String(row.idempotency_key || '');
     const m = /^schedule:([0-9a-f-]{36})$/i.exec(key);
     return m ? m[1] : null;
   }
 
-  private async fetchAppointmentForSchedulePromote(appointmentId: string): Promise<{
+  private async fetchAppointmentForSchedulePromote(
+    appointmentId: string,
+  ): Promise<{
     id: string;
     lead_id: string | null;
     status: string | null;
@@ -722,8 +763,7 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
     confirmed_at: string | null;
   } | null> {
     const qs = new URLSearchParams({
-      select:
-        'id,lead_id,status,channel,confirmed_by_client,confirmed_at',
+      select: 'id,lead_id,status,channel,confirmed_by_client,confirmed_at',
       id: `eq.${appointmentId}`,
       limit: '1',
     });
@@ -748,7 +788,9 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
     });
     const res = await this.supabaseFetch(`/rest/v1/leads?${qs}`);
     if (!res.ok) return false;
-    const rows = (await res.json()) as Array<{ meta_ads_consent: boolean | null }>;
+    const rows = (await res.json()) as Array<{
+      meta_ads_consent: boolean | null;
+    }>;
     return rows[0]?.meta_ads_consent === true;
   }
 
@@ -797,7 +839,9 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
     });
     const res = await this.supabaseFetch(`/rest/v1/leads?${qs}`);
     if (!res.ok) return false;
-    const rows = (await res.json()) as Array<{ meta_ads_consent: boolean | null }>;
+    const rows = (await res.json()) as Array<{
+      meta_ads_consent: boolean | null;
+    }>;
     return rows[0]?.meta_ads_consent === false;
   }
 
@@ -891,7 +935,8 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
       limit: '1',
     });
     if (opts.leadId) params.set('lead_id', `eq.${opts.leadId}`);
-    else if (opts.visitorKey) params.set('visitor_key', `eq.${opts.visitorKey}`);
+    else if (opts.visitorKey)
+      params.set('visitor_key', `eq.${opts.visitorKey}`);
     else return null;
     if (typeof opts.adsConsent === 'boolean') {
       params.set('ads_consent', `eq.${opts.adsConsent}`);
@@ -941,7 +986,10 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
     const payload = row.payload || {};
 
     // LeadSubmitted: solo false cancela; null/ausente permiten; error → skip (pending).
-    if (row.event_name === 'LeadSubmitted') {
+    if (
+      row.event_name === 'LeadSubmitted' ||
+      row.event_name === 'QualifiedLead'
+    ) {
       const gate = await this.leadSubmittedConsentGate(row, payload);
       if (gate.action === 'cancel_revoked') {
         await this.markSupabase(row.id, 'cancelled', gate.reason);
@@ -1024,7 +1072,8 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
       full_name:
         typeof payload.full_name === 'string' ? payload.full_name : undefined,
       city: typeof payload.city === 'string' ? payload.city : undefined,
-      country: typeof payload.country === 'string' ? payload.country : undefined,
+      country:
+        typeof payload.country === 'string' ? payload.country : undefined,
       external_id:
         typeof payload.external_id === 'string'
           ? payload.external_id
@@ -1057,12 +1106,16 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
         typeof payload.lv_internal_subtype === 'string'
           ? payload.lv_internal_subtype
           : undefined,
-      unit_id: typeof payload.unit_id === 'string' ? payload.unit_id : undefined,
-      sale_id: typeof payload.sale_id === 'string' ? payload.sale_id : undefined,
+      unit_id:
+        typeof payload.unit_id === 'string' ? payload.unit_id : undefined,
+      sale_id:
+        typeof payload.sale_id === 'string' ? payload.sale_id : undefined,
       registered_at:
         typeof payload.registered_at === 'string'
           ? payload.registered_at
           : undefined,
+      sale_at:
+        typeof payload.sale_at === 'string' ? payload.sale_at : undefined,
       value:
         typeof payload.value === 'number'
           ? payload.value
@@ -1092,6 +1145,23 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
         typeof payload.project_id === 'string' ? payload.project_id : undefined,
       contact_id:
         typeof payload.contact_id === 'string' ? payload.contact_id : undefined,
+      temperature:
+        payload.temperature === 'tibio' || payload.temperature === 'caliente'
+          ? payload.temperature
+          : undefined,
+      evidence_labels: Array.isArray(payload.evidence_labels)
+        ? payload.evidence_labels.filter(
+            (v): v is string => typeof v === 'string',
+          )
+        : undefined,
+      qualification_source:
+        payload.qualification_source === 'crm_persisted_evaluation'
+          ? 'crm_persisted_evaluation'
+          : undefined,
+      initial_lead_submitted_event_id:
+        typeof payload.initial_lead_submitted_event_id === 'string'
+          ? payload.initial_lead_submitted_event_id
+          : undefined,
     });
 
     if (result.blocked_by_consent || result.outbox_status === 'cancelled') {
@@ -1181,10 +1251,13 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
     const filter = fromStatus
       ? `id=eq.${id}&status=eq.${fromStatus}`
       : `id=eq.${id}`;
-    const res = await this.supabaseFetch(`/rest/v1/meta_capi_outbox?${filter}`, {
-      method: 'PATCH',
-      body: JSON.stringify(body),
-    });
+    const res = await this.supabaseFetch(
+      `/rest/v1/meta_capi_outbox?${filter}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      },
+    );
     if (!res.ok) {
       throw new Error(`mark_supabase_http_${res.status}`);
     }

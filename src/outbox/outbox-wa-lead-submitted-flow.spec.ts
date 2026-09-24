@@ -98,52 +98,54 @@ describe('OutboxService — LeadSubmitted Nest flow (Graph simulado)', () => {
         store.insertOutbox(row),
     } as unknown as DatabaseService;
 
-    global.fetch = jest.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      if (url.includes('/rest/v1/leads')) {
-        if (!leadHttpOk) {
-          return { ok: false, status: 503, json: async () => ([]) } as Response;
+    global.fetch = jest.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes('/rest/v1/leads')) {
+          if (!leadHttpOk) {
+            return { ok: false, status: 503, json: async () => [] } as Response;
+          }
+          return {
+            ok: true,
+            status: 200,
+            json: async () => [
+              {
+                meta_ads_consent: leadConsent,
+                tenant_id: leadTenant,
+                project_id: leadProject,
+              },
+            ],
+          } as Response;
         }
+
+        // Bitácora CRM (no Graph): no cuenta como envío Meta.
+        if (url.includes('/rest/v1/rpc/lv_log_meta_conversion')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ ok: true }),
+          } as Response;
+        }
+
+        const headers = (init?.headers || {}) as Record<string, string>;
+        const body = JSON.parse(String(init?.body || '{}')) as {
+          data?: Array<{ event_name?: string }>;
+        };
+        graphCalls.push({
+          url,
+          auth: String(headers.Authorization || ''),
+          eventName: body.data?.[0]?.event_name,
+        });
         return {
           ok: true,
           status: 200,
-          json: async () => [
-            {
-              meta_ads_consent: leadConsent,
-              tenant_id: leadTenant,
-              project_id: leadProject,
-            },
-          ],
+          json: async () => ({
+            events_received: 1,
+            fbtrace_id: 'NEST_LOCAL_MOCK_FBTRACE',
+          }),
         } as Response;
-      }
-
-      // Bitácora CRM (no Graph): no cuenta como envío Meta.
-      if (url.includes('/rest/v1/rpc/lv_log_meta_conversion')) {
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({ ok: true }),
-        } as Response;
-      }
-
-      const headers = (init?.headers || {}) as Record<string, string>;
-      const body = JSON.parse(String(init?.body || '{}')) as {
-        data?: Array<{ event_name?: string }>;
-      };
-      graphCalls.push({
-        url,
-        auth: String(headers.Authorization || ''),
-        eventName: body.data?.[0]?.event_name,
-      });
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({
-          events_received: 1,
-          fbtrace_id: 'NEST_LOCAL_MOCK_FBTRACE',
-        }),
-      } as Response;
-    }) as typeof fetch;
+      },
+    ) as typeof fetch;
   });
 
   afterEach(() => {
@@ -161,6 +163,8 @@ describe('OutboxService — LeadSubmitted Nest flow (Graph simulado)', () => {
           META_API_VERSION: 'v21.0',
           META_CAPI_ACCESS_TOKEN: 'web-token-LOCAL-ONLY',
           META_WA_CAPI_ACCESS_TOKEN: 'wa-token-LOCAL-ONLY',
+          META_WABA_ID: WABA,
+          META_MESSAGING_DATASET_ID: MSG_DATASET,
           META_CORE_SETUP_CONSERVATIVE: 'true',
           META_HTTP_TIMEOUT_MS: '5000',
         })[key],
@@ -175,7 +179,9 @@ describe('OutboxService — LeadSubmitted Nest flow (Graph simulado)', () => {
           OUTBOX_MAX_ATTEMPTS: String(maxAttempts),
           OUTBOX_RETENTION_DAYS: '90',
           META_SCHEDULE_DELIVERY_ENABLED: 'false',
-          META_WA_LEAD_SUBMITTED_DELIVERY_ENABLED: deliveryOn ? 'true' : 'false',
+          META_WA_LEAD_SUBMITTED_DELIVERY_ENABLED: deliveryOn
+            ? 'true'
+            : 'false',
           SUPABASE_URL: 'http://127.0.0.1:54321',
           SUPABASE_SERVICE_ROLE_KEY: 'local-service-role',
         })[key],
@@ -216,7 +222,9 @@ describe('OutboxService — LeadSubmitted Nest flow (Graph simulado)', () => {
     expect(row.dataset_id).toBe(MSG_DATASET);
     expect(row.event_id).toBe(EVENT_ID);
     expect(graphCalls).toHaveLength(1);
-    expect(graphCalls[0].url).toContain(`graph.facebook.com/v26.0/${MSG_DATASET}/events`);
+    expect(graphCalls[0].url).toContain(
+      `graph.facebook.com/v26.0/${MSG_DATASET}/events`,
+    );
     expect(graphCalls[0].url).not.toContain(WEB_DATASET);
     expect(graphCalls[0].auth).toBe('Bearer wa-token-LOCAL-ONLY');
     expect(graphCalls[0].auth).not.toContain('web-token');
@@ -229,7 +237,9 @@ describe('OutboxService — LeadSubmitted Nest flow (Graph simulado)', () => {
     await makeOutbox(true).tick();
 
     const row = db
-      .prepare(`SELECT status FROM outbox_events WHERE event_name = 'LeadSubmitted'`)
+      .prepare(
+        `SELECT status FROM outbox_events WHERE event_name = 'LeadSubmitted'`,
+      )
       .get() as { status: string };
     expect(row.status).toBe('cancelled');
     expect(graphCalls).toHaveLength(0);
@@ -315,7 +325,9 @@ describe('OutboxService — LeadSubmitted Nest flow (Graph simulado)', () => {
     await makeOutbox(false).tick();
 
     const ls = db
-      .prepare(`SELECT status FROM outbox_events WHERE event_name = 'LeadSubmitted'`)
+      .prepare(
+        `SELECT status FROM outbox_events WHERE event_name = 'LeadSubmitted'`,
+      )
       .get() as { status: string };
     const lead = db
       .prepare(`SELECT status FROM outbox_events WHERE event_name = 'Lead'`)
@@ -335,7 +347,9 @@ describe('OutboxService — LeadSubmitted Nest flow (Graph simulado)', () => {
     expect(a.inserted).toBe(true);
     expect(b.inserted).toBe(false);
     const count = db
-      .prepare(`SELECT COUNT(*) AS c FROM outbox_events WHERE event_name = 'LeadSubmitted'`)
+      .prepare(
+        `SELECT COUNT(*) AS c FROM outbox_events WHERE event_name = 'LeadSubmitted'`,
+      )
       .get() as { c: number };
     expect(count.c).toBe(1);
   });
@@ -344,9 +358,7 @@ describe('OutboxService — LeadSubmitted Nest flow (Graph simulado)', () => {
     insertLs({ idempotencyKey: 'wa_lead_submitted:key-a' });
     insertLs({ idempotencyKey: 'wa_lead_submitted:key-b' });
     const count = db
-      .prepare(
-        `SELECT COUNT(*) AS c FROM outbox_events WHERE event_id = ?`,
-      )
+      .prepare(`SELECT COUNT(*) AS c FROM outbox_events WHERE event_id = ?`)
       .get(EVENT_ID) as { c: number };
     expect(count.c).toBe(2);
   });
@@ -354,53 +366,55 @@ describe('OutboxService — LeadSubmitted Nest flow (Graph simulado)', () => {
   it('reintento: 500 retryable → failed + next_attempt; segundo tick con 200 → sent', async () => {
     insertLs();
     let graphHits = 0;
-    global.fetch = jest.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      if (url.includes('/rest/v1/leads')) {
+    global.fetch = jest.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes('/rest/v1/leads')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => [
+              {
+                meta_ads_consent: true,
+                tenant_id: TENANT,
+                project_id: PROJECT,
+              },
+            ],
+          } as Response;
+        }
+        if (url.includes('/rest/v1/rpc/lv_log_meta_conversion')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ ok: true }),
+          } as Response;
+        }
+        graphHits += 1;
+        const headers = (init?.headers || {}) as Record<string, string>;
+        graphCalls.push({
+          url,
+          auth: String(headers.Authorization || ''),
+          eventName: 'LeadSubmitted',
+        });
+        if (graphHits === 1) {
+          return {
+            ok: false,
+            status: 500,
+            json: async () => ({
+              error: { message: 'temporary', code: 1, is_transient: true },
+            }),
+          } as Response;
+        }
         return {
           ok: true,
           status: 200,
-          json: async () => [
-            {
-              meta_ads_consent: true,
-              tenant_id: TENANT,
-              project_id: PROJECT,
-            },
-          ],
-        } as Response;
-      }
-      if (url.includes('/rest/v1/rpc/lv_log_meta_conversion')) {
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({ ok: true }),
-        } as Response;
-      }
-      graphHits += 1;
-      const headers = (init?.headers || {}) as Record<string, string>;
-      graphCalls.push({
-        url,
-        auth: String(headers.Authorization || ''),
-        eventName: 'LeadSubmitted',
-      });
-      if (graphHits === 1) {
-        return {
-          ok: false,
-          status: 500,
           json: async () => ({
-            error: { message: 'temporary', code: 1, is_transient: true },
+            events_received: 1,
+            fbtrace_id: 'NEST_RETRY_OK',
           }),
         } as Response;
-      }
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({
-          events_received: 1,
-          fbtrace_id: 'NEST_RETRY_OK',
-        }),
-      } as Response;
-    }) as typeof fetch;
+      },
+    ) as typeof fetch;
 
     const outbox = makeOutbox(true);
     await outbox.tick();
@@ -425,13 +439,15 @@ describe('OutboxService — LeadSubmitted Nest flow (Graph simulado)', () => {
 
     await outbox.tick();
     row = db
-      .prepare(`SELECT status FROM outbox_events WHERE event_name = 'LeadSubmitted'`)
+      .prepare(
+        `SELECT status FROM outbox_events WHERE event_name = 'LeadSubmitted'`,
+      )
       .get() as { status: string };
     expect(row.status).toBe('sent');
     expect(graphHits).toBe(2);
-    expect(graphCalls.every((c) => c.auth === 'Bearer wa-token-LOCAL-ONLY')).toBe(
-      true,
-    );
+    expect(
+      graphCalls.every((c) => c.auth === 'Bearer wa-token-LOCAL-ONLY'),
+    ).toBe(true);
   });
 
   it('enqueue Nest real: BM exige CTWA y dataset mensajería; rechaza TestEvent en DTO path', () => {

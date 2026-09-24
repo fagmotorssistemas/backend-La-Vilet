@@ -1,7 +1,9 @@
 # AGENTS.md — lavilet-meta-capi
 
 1. Dataset canónico: `923439043758658` (La Vilet Web).
-2. Eventos: `ViewContent`, `Lead`, `Schedule`, `LeadSubmitted`, `AddToWishlist`, `Purchase`.
+2. Eventos: `ViewContent`, `Lead`, `Schedule`, `LeadSubmitted`, `QualifiedLead`, `AddToWishlist`, `Purchase`.
+   QualifiedLead: `META_WA_CRM_QUALIFICATION_DELIVERY_ENABLED`; solo primera
+   evaluación CRM persistida `tibio|caliente`, con identidad `wa_crm_qualified:{lead_id}`.
    Purchase: `META_PURCHASE_DELIVERY_ENABLED` + `META_PURCHASE_ACTIVATED_AT` (ISO).
    Elegibilidad: `registered_at` Y `sale_at` (confirmación comercial existente) ambos ≥ corte.
    `action_source=system_generated` (cierre CRM). No `website` por registrar en CRM ni
