@@ -15,6 +15,7 @@ import type { EnqueueEventDto } from './dto/enqueue-event.dto';
 import { evaluateMetaAcceptanceEvidence } from '../meta/meta-acceptance';
 import {
   gateAddToWishlist,
+  gateHomeListingContent,
   gatePurchase,
   gateViewContent,
   normalizeCurrency,
@@ -280,6 +281,15 @@ export class EventsService {
     const saleId = String(dto.sale_id || '').trim() || null;
     const leadId = dto.lead_id || dto.external_id || null;
 
+    const homeListingGate = gateHomeListingContent({
+      contentType: dto.content_type,
+      contentIds: dto.content_ids,
+      unitId,
+    });
+    if (!homeListingGate.ok) {
+      throw new BadRequestException(homeListingGate.reason);
+    }
+
     if (dto.event_name === 'ViewContent') {
       const gate = gateViewContent({
         subtype,
@@ -371,6 +381,7 @@ export class EventsService {
       clientIpAddress: dto.client_ip_address,
       clientUserAgent: dto.client_user_agent,
       contentIds,
+      contentType: dto.content_type,
       contentName: dto.content_name,
       contentCategory: dto.content_category,
       value: purchaseValue,

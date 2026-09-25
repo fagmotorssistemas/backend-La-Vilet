@@ -1,4 +1,11 @@
-import { gateAddToWishlist, gatePurchase, gateViewContent, normalizeCurrency, resolveViewContentContentIds } from './measurement-event-gates';
+import {
+  gateAddToWishlist,
+  gateHomeListingContent,
+  gatePurchase,
+  gateViewContent,
+  normalizeCurrency,
+  resolveViewContentContentIds,
+} from './measurement-event-gates';
 
 describe('measurement-event-gates', () => {
   it('ViewContent showroom_general no exige unit', () => {
@@ -19,6 +26,41 @@ describe('measurement-event-gates', () => {
     expect(
       gateViewContent({ subtype: 'detalle_unidad', unitId: 'u1' }),
     ).toEqual({ ok: true });
+  });
+
+  it('no deriva content_ids desde unit_id', () => {
+    expect(
+      resolveViewContentContentIds({
+        subtype: 'detalle_unidad',
+        unitId: 'a974716f-fd87-4cd7-aaa7-a7793a33fb3b',
+        contentIds: null,
+      }),
+    ).toBeUndefined();
+  });
+
+  it('home_listing exige exactamente el units.id explícito', () => {
+    const unitId = 'a974716f-fd87-4cd7-aaa7-a7793a33fb3b';
+    expect(
+      gateHomeListingContent({
+        contentType: 'home_listing',
+        contentIds: [unitId],
+        unitId,
+      }),
+    ).toEqual({ ok: true });
+    expect(
+      gateHomeListingContent({
+        contentType: 'home_listing',
+        contentIds: undefined,
+        unitId,
+      }).reason,
+    ).toBe('home_listing_content_ids_must_match_unit_id');
+    expect(
+      gateHomeListingContent({
+        contentType: 'home_listing',
+        contentIds: [unitId],
+        unitId: null,
+      }).reason,
+    ).toBe('home_listing_unit_id_required');
   });
 
   it('AddToWishlist website + lead + unit', () => {

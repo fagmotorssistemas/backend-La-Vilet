@@ -1094,6 +1094,8 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
       content_ids: Array.isArray(payload.content_ids)
         ? payload.content_ids.filter((v): v is string => typeof v === 'string')
         : undefined,
+      content_type:
+        payload.content_type === 'home_listing' ? 'home_listing' : undefined,
       content_name:
         typeof payload.content_name === 'string'
           ? payload.content_name

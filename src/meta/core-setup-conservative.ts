@@ -1,6 +1,6 @@
 /**
  * Modo conservador para Meta Core Setup / configuración básica:
- * - Sin custom_data (incl. content_ids / content_name / content_category)
+ * - Sin custom_data (incl. content_ids / content_type / content_name / content_category)
  * - event_source_url limitado al origen (scheme + host [+ port]), sin path/query/hash
  *
  * Funciones puras: aplicables al construir y justo antes de Graph (cola antigua).

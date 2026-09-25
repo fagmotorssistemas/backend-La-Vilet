@@ -35,6 +35,7 @@ export type BuildGraphInput = {
   clientIpAddress?: string | null;
   clientUserAgent?: string | null;
   contentIds?: string[];
+  contentType?: 'home_listing' | null;
   contentName?: string | null;
   contentCategory?: string | null;
   /** Purchase: Meta exige value+currency en custom_data. */
@@ -312,6 +313,7 @@ export class MetaCapiService {
     const custom: Record<string, unknown> = {};
     if (!conservative) {
       if (input.contentIds?.length) custom.content_ids = input.contentIds;
+      if (input.contentType) custom.content_type = input.contentType;
       if (input.contentName) custom.content_name = input.contentName;
       if (input.contentCategory)
         custom.content_category = input.contentCategory;
@@ -363,6 +365,7 @@ export class MetaCapiService {
       has_fbp: Boolean(input.fbp),
       has_fbc: Boolean(input.fbc),
       content_ids: conservative ? null : input.contentIds || null,
+      content_type: conservative ? null : input.contentType || null,
       content_name: conservative ? null : input.contentName || null,
       content_category: conservative ? null : input.contentCategory || null,
       value: isPurchase ? (input.value ?? null) : null,

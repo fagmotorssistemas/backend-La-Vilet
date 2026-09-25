@@ -128,6 +128,10 @@ export class EnqueueEventDto {
   content_ids?: string[];
 
   @IsOptional()
+  @IsIn(['home_listing'])
+  content_type?: 'home_listing';
+
+  @IsOptional()
   @IsString()
   @MaxLength(256)
   content_name?: string;

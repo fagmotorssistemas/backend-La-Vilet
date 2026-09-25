@@ -29,6 +29,7 @@ describe('core-setup-conservative', () => {
           user_data: { client_user_agent: 'ua' },
           custom_data: {
             content_ids: ['a974716f-fd87-4cd7-aaa7-a7793a33fb3b'],
+            content_type: 'home_listing',
             content_name: 'Unidad 208',
             content_category: 'suite',
           },

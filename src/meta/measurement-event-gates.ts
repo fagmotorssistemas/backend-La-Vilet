@@ -13,8 +13,7 @@ export type LvInternalSubtype =
   | string;
 
 export type MeasurementGateResult =
-  | { ok: true }
-  | { ok: false; reason: string };
+  { ok: true } | { ok: false; reason: string };
 
 const ISO4217 = /^[A-Z]{3}$/;
 
@@ -131,4 +130,26 @@ export function resolveViewContentContentIds(input: {
   }
   if (input.contentIds?.length) return [...input.contentIds];
   return undefined;
+}
+
+/** Catálogo inmobiliario: conserva solo la identidad explícita y coherente del productor. */
+export function gateHomeListingContent(input: {
+  contentType?: string | null;
+  contentIds?: string[] | null;
+  unitId?: string | null;
+}): MeasurementGateResult {
+  if (input.contentType !== 'home_listing') return { ok: true };
+  const unitId = String(input.unitId || '').trim();
+  if (!unitId) return { ok: false, reason: 'home_listing_unit_id_required' };
+  if (
+    !Array.isArray(input.contentIds) ||
+    input.contentIds.length !== 1 ||
+    input.contentIds[0] !== unitId
+  ) {
+    return {
+      ok: false,
+      reason: 'home_listing_content_ids_must_match_unit_id',
+    };
+  }
+  return { ok: true };
 }
