@@ -31,7 +31,7 @@ export function normalizeCurrency(
 /**
  * ViewContent:
  * - showroom_general: no exige unit; no inventar content_ids
- * - detalle_unidad: unit_id recomendado; content_ids solo si vienen del productor
+ * - detalle_unidad: unit_id obligatorio; home_listing se resuelve en resolveHomeListingContent
  */
 export function gateViewContent(input: {
   subtype?: string | null;
@@ -123,16 +123,48 @@ export function resolveViewContentContentIds(input: {
   unitId?: string | null;
   contentIds?: string[] | null;
 }): string[] | undefined {
-  const subtype = String(input.subtype || '').trim();
-  if (subtype === 'showroom_general') {
-    // Solo lo que el productor envió explícitamente (FE conservative → vacío).
-    return input.contentIds?.length ? [...input.contentIds] : undefined;
-  }
-  if (input.contentIds?.length) return [...input.contentIds];
-  return undefined;
+  return resolveHomeListingContent(input).contentIds;
 }
 
-/** Catálogo inmobiliario: conserva solo la identidad explícita y coherente del productor. */
+/**
+ * Identidad catálogo inmobiliario para Graph:
+ * - showroom_general: nunca inventar desde unit_id (solo lo del productor).
+ * - con unit_id: content_type=home_listing y content_ids=[unit_id]
+ *   (si el productor ya mandó ids, se conservan para que el gate valide coherencia).
+ * - sin unit_id: no inventa.
+ */
+export function resolveHomeListingContent(input: {
+  subtype?: string | null;
+  unitId?: string | null;
+  contentIds?: string[] | null;
+  contentType?: string | null;
+}): {
+  contentType?: 'home_listing';
+  contentIds?: string[];
+} {
+  const subtype = String(input.subtype || '').trim();
+  const unitId = String(input.unitId || '').trim() || null;
+  const producerIds = input.contentIds?.length
+    ? [...input.contentIds]
+    : undefined;
+  const producerType =
+    input.contentType === 'home_listing' ? ('home_listing' as const) : undefined;
+
+  if (subtype === 'showroom_general') {
+    return { contentType: producerType, contentIds: producerIds };
+  }
+
+  if (!unitId) {
+    return { contentType: producerType, contentIds: producerIds };
+  }
+
+  return {
+    contentType: 'home_listing',
+    contentIds: producerIds ?? [unitId],
+  };
+}
+
+/** Catálogo inmobiliario: exige unit_id y content_ids=[unit_id] si hay home_listing. */
 export function gateHomeListingContent(input: {
   contentType?: string | null;
   contentIds?: string[] | null;

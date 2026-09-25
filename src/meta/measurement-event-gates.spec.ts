@@ -4,10 +4,13 @@ import {
   gatePurchase,
   gateViewContent,
   normalizeCurrency,
+  resolveHomeListingContent,
   resolveViewContentContentIds,
 } from './measurement-event-gates';
 
 describe('measurement-event-gates', () => {
+  const unitId = 'a974716f-fd87-4cd7-aaa7-a7793a33fb3b';
+
   it('ViewContent showroom_general no exige unit', () => {
     expect(
       gateViewContent({ subtype: 'showroom_general', unitId: null }),
@@ -28,18 +31,53 @@ describe('measurement-event-gates', () => {
     ).toEqual({ ok: true });
   });
 
-  it('no deriva content_ids desde unit_id', () => {
+  it('resolveHomeListingContent no inventa en showroom_general', () => {
     expect(
-      resolveViewContentContentIds({
-        subtype: 'detalle_unidad',
-        unitId: 'a974716f-fd87-4cd7-aaa7-a7793a33fb3b',
+      resolveHomeListingContent({
+        subtype: 'showroom_general',
+        unitId,
         contentIds: null,
       }),
-    ).toBeUndefined();
+    ).toEqual({ contentType: undefined, contentIds: undefined });
+  });
+
+  it('resolveHomeListingContent deriva home_listing desde unit_id', () => {
+    expect(
+      resolveHomeListingContent({
+        subtype: 'detalle_unidad',
+        unitId,
+        contentIds: null,
+      }),
+    ).toEqual({ contentType: 'home_listing', contentIds: [unitId] });
+    expect(
+      resolveHomeListingContent({
+        subtype: 'favorito',
+        unitId,
+        contentIds: null,
+      }),
+    ).toEqual({ contentType: 'home_listing', contentIds: [unitId] });
+    expect(
+      resolveHomeListingContent({
+        unitId,
+        contentIds: null,
+      }),
+    ).toEqual({ contentType: 'home_listing', contentIds: [unitId] });
+  });
+
+  it('resolveHomeListingContent conserva ids del productor para el gate', () => {
+    expect(
+      resolveHomeListingContent({
+        unitId,
+        contentIds: ['other-id'],
+        contentType: 'home_listing',
+      }),
+    ).toEqual({
+      contentType: 'home_listing',
+      contentIds: ['other-id'],
+    });
   });
 
   it('home_listing exige exactamente el units.id explícito', () => {
-    const unitId = 'a974716f-fd87-4cd7-aaa7-a7793a33fb3b';
     expect(
       gateHomeListingContent({
         contentType: 'home_listing',

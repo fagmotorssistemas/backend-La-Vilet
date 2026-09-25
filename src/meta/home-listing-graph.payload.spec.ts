@@ -37,19 +37,70 @@ describe('Graph home listing content contract (sin HTTP)', () => {
     });
   });
 
-  it('Core Setup elimina ambos campos incluso si fueron suministrados', () => {
+  it('Core Setup preserva home_listing content_ids + content_type', () => {
     const built = makeMeta(true).buildGraphPayload({
       eventName: 'ViewContent',
       actionSource: 'website',
       contentIds: [unitId],
       contentType: 'home_listing',
+      contentName: 'Unidad 208',
+      contentCategory: 'suite',
     });
     const event = (built.payload.data as Array<Record<string, unknown>>)[0];
-    expect(event.custom_data).toBeUndefined();
+    expect(event.custom_data).toEqual({
+      content_ids: [unitId],
+      content_type: 'home_listing',
+    });
     expect(built.redacted).toMatchObject({
-      content_ids: null,
-      content_type: null,
+      content_ids: [unitId],
+      content_type: 'home_listing',
+      content_name: null,
+      content_category: null,
       core_setup_conservative: true,
+    });
+  });
+
+  it('Core Setup antes de Graph reinyecta home_listing en cola antigua', () => {
+    const meta = makeMeta(true);
+    const body = {
+      data: [
+        {
+          event_name: 'ViewContent',
+          event_id: '123ddc30-a6dc-4861-a87e-9ea22cebd313',
+          custom_data: {
+            content_ids: [unitId],
+            content_type: 'home_listing',
+            content_name: 'Unidad 208',
+            content_category: 'suite',
+          },
+          event_source_url: 'https://preview.example/tour/unidad/u1?x=1',
+        },
+      ],
+    };
+    const next = meta.applyCoreSetupBeforeGraphSend(body);
+    const event = (next.data as Array<Record<string, unknown>>)[0];
+    expect(event.custom_data).toEqual({
+      content_ids: [unitId],
+      content_type: 'home_listing',
+    });
+    expect(event.event_source_url).toBe('https://preview.example');
+  });
+
+  it('Core Setup Purchase conserva value/currency junto a home_listing', () => {
+    const built = makeMeta(true).buildGraphPayload({
+      eventName: 'Purchase',
+      actionSource: 'system_generated',
+      contentIds: [unitId],
+      contentType: 'home_listing',
+      value: 150000,
+      currency: 'USD',
+    });
+    const event = (built.payload.data as Array<Record<string, unknown>>)[0];
+    expect(event.custom_data).toEqual({
+      content_ids: [unitId],
+      content_type: 'home_listing',
+      value: 150000,
+      currency: 'USD',
     });
   });
 

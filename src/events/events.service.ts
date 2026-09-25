@@ -19,7 +19,7 @@ import {
   gatePurchase,
   gateViewContent,
   normalizeCurrency,
-  resolveViewContentContentIds,
+  resolveHomeListingContent,
 } from '../meta/measurement-event-gates';
 
 export type NestEventLookupResponse = {
@@ -281,9 +281,18 @@ export class EventsService {
     const saleId = String(dto.sale_id || '').trim() || null;
     const leadId = dto.lead_id || dto.external_id || null;
 
-    const homeListingGate = gateHomeListingContent({
-      contentType: dto.content_type,
+    const homeListing = resolveHomeListingContent({
+      subtype,
+      unitId,
       contentIds: dto.content_ids,
+      contentType: dto.content_type,
+    });
+    const contentIds = homeListing.contentIds;
+    const contentType = homeListing.contentType;
+
+    const homeListingGate = gateHomeListingContent({
+      contentType,
+      contentIds,
       unitId,
     });
     if (!homeListingGate.ok) {
@@ -294,7 +303,7 @@ export class EventsService {
       const gate = gateViewContent({
         subtype,
         unitId,
-        contentIds: dto.content_ids,
+        contentIds,
       });
       if (!gate.ok) throw new BadRequestException(gate.reason);
     }
@@ -351,15 +360,6 @@ export class EventsService {
 
     const fbc = this.meta.buildFbc(dto.fbclid, dto.fbc);
 
-    const contentIds =
-      dto.event_name === 'ViewContent'
-        ? resolveViewContentContentIds({
-            subtype,
-            unitId,
-            contentIds: dto.content_ids,
-          })
-        : dto.content_ids;
-
     const built = this.meta.buildGraphPayload({
       eventName: dto.event_name,
       eventId: dto.event_id,
@@ -381,7 +381,7 @@ export class EventsService {
       clientIpAddress: dto.client_ip_address,
       clientUserAgent: dto.client_user_agent,
       contentIds,
-      contentType: dto.content_type,
+      contentType,
       contentName: dto.content_name,
       contentCategory: dto.content_category,
       value: purchaseValue,

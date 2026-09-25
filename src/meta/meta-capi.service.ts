@@ -218,7 +218,8 @@ export class MetaCapiService {
 
   /**
    * Revalida reglas Core Setup sobre un body Graph ya persistido (cola antigua).
-   * Idempotente; no toca Meta. Conserva value/currency de Purchase (exigidos por Meta).
+   * Idempotente; no toca Meta. Conserva value/currency de Purchase y
+   * content_ids/content_type home_listing (catálogo inmobiliario).
    */
   applyCoreSetupBeforeGraphSend(
     body: Record<string, unknown>,
@@ -227,34 +228,36 @@ export class MetaCapiService {
     const events = Array.isArray(body.data)
       ? (body.data as Array<Record<string, unknown>>)
       : [];
-    const purchaseKeep: Array<{
-      value?: unknown;
-      currency?: unknown;
-    } | null> = events.map((ev) => {
-      if (
-        (typeof ev?.event_name === 'string' ? ev.event_name : '') !== 'Purchase'
-      )
-        return null;
-      const cd =
-        ev.custom_data && typeof ev.custom_data === 'object'
-          ? (ev.custom_data as Record<string, unknown>)
-          : {};
-      return {
-        value: cd.value,
-        currency: cd.currency,
-      };
-    });
+    const keepCustom: Array<Record<string, unknown> | null> = events.map(
+      (ev) => {
+        const cd =
+          ev?.custom_data && typeof ev.custom_data === 'object'
+            ? (ev.custom_data as Record<string, unknown>)
+            : {};
+        const kept: Record<string, unknown> = {};
+        const eventName =
+          typeof ev?.event_name === 'string' ? ev.event_name : '';
+        if (eventName === 'Purchase') {
+          if (cd.value != null) kept.value = cd.value;
+          if (cd.currency != null) kept.currency = cd.currency;
+        }
+        if (cd.content_type === 'home_listing') {
+          if (Array.isArray(cd.content_ids) && cd.content_ids.length) {
+            kept.content_ids = cd.content_ids;
+          }
+          kept.content_type = 'home_listing';
+        }
+        return Object.keys(kept).length ? kept : null;
+      },
+    );
     const next = applyCoreSetupConservativeToGraphBody(body);
     const nextEvents = Array.isArray(next.data)
       ? (next.data as Array<Record<string, unknown>>)
       : [];
     for (let i = 0; i < nextEvents.length; i += 1) {
-      const keep = purchaseKeep[i];
+      const keep = keepCustom[i];
       if (!keep) continue;
-      const kept: Record<string, unknown> = {};
-      if (keep.value != null) kept.value = keep.value;
-      if (keep.currency != null) kept.currency = keep.currency;
-      if (Object.keys(kept).length) nextEvents[i].custom_data = kept;
+      nextEvents[i].custom_data = keep;
     }
     return next;
   }
@@ -311,9 +314,11 @@ export class MetaCapiService {
     const conservative = this.coreSetupConservative;
     const isPurchase = input.eventName === 'Purchase';
     const custom: Record<string, unknown> = {};
+    // home_listing + content_ids: se construyen siempre; Core Setup los reinyecta
+    // tras el strip (igual que Purchase value/currency). name/category solo fuera.
+    if (input.contentIds?.length) custom.content_ids = input.contentIds;
+    if (input.contentType) custom.content_type = input.contentType;
     if (!conservative) {
-      if (input.contentIds?.length) custom.content_ids = input.contentIds;
-      if (input.contentType) custom.content_type = input.contentType;
       if (input.contentName) custom.content_name = input.contentName;
       if (input.contentCategory)
         custom.content_category = input.contentCategory;
@@ -334,18 +339,26 @@ export class MetaCapiService {
     }
     if (conservative) {
       payload = applyCoreSetupConservativeToGraphBody(payload);
-      // Reinyectar value/currency Purchase tras strip de custom_data genérico.
-      if (isPurchase && (custom.value != null || custom.currency)) {
-        const events = payload.data as Array<Record<string, unknown>>;
-        if (Array.isArray(events) && events[0]) {
-          const kept: Record<string, unknown> = {};
+      // Reinyectar home_listing + Purchase tras strip de custom_data genérico.
+      const events = payload.data as Array<Record<string, unknown>>;
+      if (Array.isArray(events) && events[0]) {
+        const kept: Record<string, unknown> = {};
+        if (custom.content_type === 'home_listing') {
+          if (Array.isArray(custom.content_ids) && custom.content_ids.length) {
+            kept.content_ids = custom.content_ids;
+          }
+          kept.content_type = 'home_listing';
+        }
+        if (isPurchase) {
           if (custom.value != null) kept.value = custom.value;
           if (custom.currency) kept.currency = custom.currency;
-          events[0].custom_data = kept;
         }
+        if (Object.keys(kept).length) events[0].custom_data = kept;
       }
     }
 
+    const homeListingKept =
+      input.contentType === 'home_listing' && Boolean(input.contentIds?.length);
     const redacted = {
       event_name: input.eventName,
       event_id: eventId,
@@ -364,8 +377,16 @@ export class MetaCapiService {
       has_client_ua: Boolean(input.clientUserAgent),
       has_fbp: Boolean(input.fbp),
       has_fbc: Boolean(input.fbc),
-      content_ids: conservative ? null : input.contentIds || null,
-      content_type: conservative ? null : input.contentType || null,
+      content_ids: homeListingKept
+        ? input.contentIds || null
+        : conservative
+          ? null
+          : input.contentIds || null,
+      content_type: homeListingKept
+        ? input.contentType || null
+        : conservative
+          ? null
+          : input.contentType || null,
       content_name: conservative ? null : input.contentName || null,
       content_category: conservative ? null : input.contentCategory || null,
       value: isPurchase ? (input.value ?? null) : null,

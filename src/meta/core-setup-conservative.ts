@@ -1,7 +1,9 @@
 /**
  * Modo conservador para Meta Core Setup / configuración básica:
- * - Sin custom_data (incl. content_ids / content_type / content_name / content_category)
+ * - Sin custom_data genérico (content_name / content_category, etc.)
  * - event_source_url limitado al origen (scheme + host [+ port]), sin path/query/hash
+ * - Excepciones reinyectadas por MetaCapiService: Purchase value/currency y
+ *   home_listing content_ids + content_type (catálogo inmobiliario).
  *
  * Funciones puras: aplicables al construir y justo antes de Graph (cola antigua).
  */
