@@ -1,5 +1,6 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common'
 import { ConfigService } from '@nestjs/config'
+import { createHash, timingSafeEqual } from 'crypto'
 import { DatabaseService } from '../database/database.service'
 import { resolveWaCloudWebhookFlags } from './whatsapp-flags'
 import {
@@ -111,6 +112,20 @@ export class WhatsappWebhookService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private allowedTestWaIdHash(): string {
+    return String(
+      this.config.get<string>('META_WA_CLOUD_ALLOWED_WA_ID_SHA256') || '',
+    ).trim().toLowerCase()
+  }
+
+  private messageMatchesTestAllowlist(message: WaCloudInboundMessage): boolean {
+    const expected = this.allowedTestWaIdHash()
+    if (!expected) return true
+    if (!/^[a-f0-9]{64}$/.test(expected)) return false
+    const actual = createHash('sha256').update(message.waIdRaw).digest('hex')
+    return timingSafeEqual(Buffer.from(actual, 'hex'), Buffer.from(expected, 'hex'))
+  }
+
   flags() {
     return resolveWaCloudWebhookFlags({
       META_WA_CLOUD_WEBHOOK_CHALLENGE_ENABLED: this.config.get<string>(
@@ -217,6 +232,17 @@ export class WhatsappWebhookService implements OnModuleInit, OnModuleDestroy {
     const expectedPhoneNumberId = String(
       this.config.get<string>('META_WA_PHONE_NUMBER_ID') || '',
     ).trim()
+
+    // Barrera previa a cualquier escritura: cuando se configura, el lote completo
+    // debe pertenecer al único WA ID de prueba autorizado. Nunca registra el WA ID.
+    if (
+      this.allowedTestWaIdHash() &&
+      parsed.changes.some((change) =>
+        change.messages.some((message) => !this.messageMatchesTestAllowlist(message)),
+      )
+    ) {
+      return { ok: false, reason: 'test_wa_id_not_allowed', status: 403 }
+    }
 
     let processed = 0
     let inserted = 0
@@ -550,6 +576,7 @@ export class WhatsappWebhookService implements OnModuleInit, OnModuleDestroy {
       phone_number_id_configured: Boolean(
         String(this.config.get<string>('META_WA_PHONE_NUMBER_ID') || '').trim(),
       ),
+      test_wa_id_allowlist_configured: Boolean(this.allowedTestWaIdHash()),
       receipt_counts: this.db.countsWaCloudReceipts(),
       reject_counts,
       last_reject: this.lastReject,

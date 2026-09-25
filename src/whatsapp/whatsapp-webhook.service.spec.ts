@@ -2,6 +2,7 @@ import { ConfigService } from '@nestjs/config'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
+import { createHash } from 'crypto'
 import { DatabaseService } from '../database/database.service'
 import { WhatsappWebhookService } from './whatsapp-webhook.service'
 
@@ -133,6 +134,31 @@ describe('WhatsappWebhookService', () => {
       reason: 'receive_disabled',
       status: 503,
     })
+    cleanup()
+  })
+
+  it('allowlist de prueba rechaza todo el lote antes de persistir otro contacto', async () => {
+    const allowed = '593911111111'
+    const { service, db, cleanup } = makeService({
+      ...baseEnv,
+      META_WA_CLOUD_ALLOWED_WA_ID_SHA256: createHash('sha256')
+        .update(allowed)
+        .digest('hex'),
+    })
+    const rejected = await service.processSignedWebhook(
+      metaBody({ wamid: 'wamid.OTHER', from: '593922222222', ctwaClid: 'CLID-X' }),
+    )
+    expect(rejected).toEqual({
+      ok: false,
+      reason: 'test_wa_id_not_allowed',
+      status: 403,
+    })
+    expect(db.getWaCloudReceipt('wamid.OTHER')).toBeNull()
+
+    const accepted = await service.processSignedWebhook(
+      metaBody({ wamid: 'wamid.ALLOWED', from: allowed, ctwaClid: 'CLID-Y' }),
+    )
+    expect(accepted.ok && accepted.inserted).toBe(1)
     cleanup()
   })
 
