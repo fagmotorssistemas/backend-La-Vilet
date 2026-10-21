@@ -18,13 +18,33 @@ type Fixture = Record<string, unknown> & {
 
 describe('contrato frontend/backend conciliado (integración aislada)', () => {
   const secret = 'integration-local-secret';
-  const fixtures = JSON.parse(
+  const rawFixtures = JSON.parse(
     readFileSync(
       process.env.CAPI_FRONTEND_FIXTURES ||
         'D:/FrontLaVilet/docs/CAPI_LOCAL_TEST_PAYLOADS.json',
       'utf8',
     ),
   ) as Fixture[];
+  // Contrato 2026-10: la venta real es VentaCerrada y Purchase es el contacto
+  // calificado. Mientras el frontend publique la venta como Purchase en sus
+  // fixtures, se traduce aquí (y se prueba aparte que el formato antiguo se rechaza).
+  const legacySale = rawFixtures.find(
+    (item) =>
+      item.event_name === 'Purchase' &&
+      item.action_source === 'system_generated',
+  );
+  const fixtures: Fixture[] = rawFixtures.map((item) =>
+    item === legacySale
+      ? {
+          ...item,
+          event_name: 'VentaCerrada',
+          idempotency_key: item.idempotency_key.replace(
+            /^purchase:/,
+            'venta_cerrada:',
+          ),
+        }
+      : item,
+  );
   let app: INestApplication;
   let database: DatabaseService;
   let dir: string;
@@ -94,7 +114,7 @@ describe('contrato frontend/backend conciliado (integración aislada)', () => {
         'AddToWishlist',
         'Schedule',
         'LeadSubmitted',
-        'Purchase',
+        legacySale ? 'VentaCerrada' : 'Purchase',
       ]),
     );
 
@@ -143,7 +163,7 @@ describe('contrato frontend/backend conciliado (integración aislada)', () => {
           whatsapp_business_account_id: fixture.whatsapp_business_account_id,
         });
       }
-      if (fixture.event_name === 'Purchase') {
+      if (fixture.event_name === 'VentaCerrada') {
         expect(graph.data[0].custom_data).toMatchObject({
           value: fixture.value,
           currency: fixture.currency,
@@ -283,7 +303,19 @@ describe('contrato frontend/backend conciliado (integración aislada)', () => {
     }
   });
 
-  it('separa carriles y retiene Purchase cuando faltan fechas originales', async () => {
+  it('rechaza la venta con el formato antiguo (Purchase system_generated)', async () => {
+    if (!legacySale) return;
+    const response = await post({
+      ...legacySale,
+      idempotency_key: `${legacySale.idempotency_key}:legacy`,
+      event_id: 'a0000000-0000-4000-8000-0000000000aa',
+    }).expect(400);
+    expect(response.body.message).toBe(
+      'purchase_is_qualified_contact_use_venta_cerrada',
+    );
+  });
+
+  it('separa carriles y retiene VentaCerrada cuando faltan fechas originales', async () => {
     const live = await post({
       event_name: 'Lead',
       idempotency_key: 'lead:live-held-in-test',
@@ -299,8 +331,8 @@ describe('contrato frontend/backend conciliado (integración aislada)', () => {
     ).toBe(undefined);
 
     const missingDates = await post({
-      event_name: 'Purchase',
-      idempotency_key: 'purchase:99999999-9999-4999-8999-999999999999',
+      event_name: 'VentaCerrada',
+      idempotency_key: 'venta_cerrada:99999999-9999-4999-8999-999999999999',
       event_id: 'a0000000-0000-4000-8000-000000000002',
       event_time: 1790253001,
       action_source: 'system_generated',
@@ -317,12 +349,12 @@ describe('contrato frontend/backend conciliado (integración aislada)', () => {
       database.getLatestByEventId(missingDates.body.event_id)?.status,
     ).toBe('pending');
 
-    process.env.META_PURCHASE_DELIVERY_ENABLED = 'true';
-    process.env.META_PURCHASE_ACTIVATED_AT = '2026-09-24T00:00:00.000Z';
+    process.env.META_SALE_DELIVERY_ENABLED = 'true';
+    process.env.META_SALE_ACTIVATED_AT = '2026-09-24T00:00:00.000Z';
     await app.get(OutboxService).tick();
     expect(
       database.getLatestByEventId(missingDates.body.event_id)?.last_error,
-    ).toBe('purchase_registered_at_required');
+    ).toBe('sale_registered_at_required');
     expect(
       database.getLatestByEventId(missingDates.body.event_id)?.status,
     ).toBe('pending');

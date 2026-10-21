@@ -16,14 +16,22 @@ import {
 } from 'class-validator';
 import { Transform } from 'class-transformer';
 
+/**
+ * Purchase = contacto calificado (web o WhatsApp), VentaCerrada = venta real
+ * (CRM). Search e InitiateCheckout completan el embudo del catálogo inmobiliario.
+ * AddToWishlist se mantiene por compatibilidad; el favorito nuevo es InitiateCheckout.
+ */
 export const META_ENQUEUE_EVENT_NAMES = [
   'ViewContent',
+  'Search',
+  'InitiateCheckout',
   'Lead',
   'Schedule',
   'LeadSubmitted',
   'QualifiedLead',
   'AddToWishlist',
   'Purchase',
+  'VentaCerrada',
 ] as const;
 
 export type MetaEnqueueEventName = (typeof META_ENQUEUE_EVENT_NAMES)[number];
@@ -151,24 +159,24 @@ export class EnqueueEventDto {
   @IsUUID('4')
   unit_id?: string;
 
-  /** Cierre comercial (Purchase). Idempotency FE: purchase:{sale_id}. */
+  /** Cierre comercial (VentaCerrada). Idempotency FE: venta_cerrada:{sale_id}. */
   @IsOptional()
   @IsUUID('4')
   sale_id?: string;
 
-  /** Importe Purchase (Meta custom_data.value). */
+  /** Importe real de VentaCerrada. En Purchase se ignora: usa el valor fijo configurado. */
   @IsOptional()
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0.01)
   value?: number;
 
-  /** ISO-4217; obligatorio para Purchase. No inventar. */
+  /** ISO-4217; obligatorio para VentaCerrada. No inventar. */
   @IsOptional()
   @IsString()
   @MaxLength(3)
   currency?: string;
 
-  /** Momento de registro FE (corte Purchase). */
+  /** Momento de registro FE (corte VentaCerrada). */
   @IsOptional()
   @IsString()
   @IsISO8601({ strict: true })

@@ -1,10 +1,11 @@
 /**
- * cancelPurchaseBySaleId / annotate after Meta accept.
+ * Anulación de la venta real: cancelPurchaseBySaleId / annotate tras aceptación
+ * de Meta. Cubre la clave actual venta_cerrada:{sale_id} y la legada purchase:{sale_id}.
  */
 import Database from 'better-sqlite3';
 import { SqliteOutboxStore } from '../database/sqlite-store';
 
-describe('purchase annulment persistence', () => {
+describe('sale (VentaCerrada) annulment persistence', () => {
   let db: Database.Database;
   let store: SqliteOutboxStore;
 
@@ -20,12 +21,12 @@ describe('purchase annulment persistence', () => {
 
   it('cancela pending y anota sent sin revertir', () => {
     store.insertOutbox({
-      idempotency_key: 'purchase:sale-open',
+      idempotency_key: 'venta_cerrada:sale-open',
       event_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
-      event_name: 'Purchase',
+      event_name: 'VentaCerrada',
       event_time: 1,
       payload_redacted: { sale_id: 'sale-open' },
-      graph_payload: { data: [{ event_name: 'Purchase' }] },
+      graph_payload: { data: [{ event_name: 'VentaCerrada' }] },
       dataset_id: 'WEB',
       delivery_lane: 'live',
       visitor_key: null,
@@ -45,7 +46,7 @@ describe('purchase annulment persistence', () => {
       lead_id: 'lead-1',
       ads_consent_required: true,
     });
-    const claimed = store.claimPending(10, 'live', { excludePurchase: false });
+    const claimed = store.claimPending(10, 'live');
     const processing = claimed.find((r) => r.event_id === sent.row.event_id);
     expect(processing).toBeTruthy();
     store.markSent(processing!.id, {
@@ -68,7 +69,7 @@ describe('purchase annulment persistence', () => {
       .prepare(
         `SELECT status, last_error FROM outbox_events WHERE idempotency_key=?`,
       )
-      .get('purchase:sale-open') as { status: string; last_error: string };
+      .get('venta_cerrada:sale-open') as { status: string; last_error: string };
     const accepted = db
       .prepare(
         `SELECT status, last_error FROM outbox_events WHERE idempotency_key=?`,

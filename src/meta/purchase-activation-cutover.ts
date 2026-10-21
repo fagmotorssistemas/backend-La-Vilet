@@ -1,5 +1,5 @@
 /**
- * Corte de activación Purchase (sin I/O).
+ * Corte de activación de la venta real, VentaCerrada (sin I/O).
  *
  * Elegibilidad exige AMBAS evidencias existentes (no inventadas):
  * - registered_at: cuándo se registró el cierre en CRM
@@ -53,12 +53,12 @@ export type PurchaseActivationGate =
   | {
       ok: false;
       reason:
-        | 'purchase_activation_cutover_required'
-        | 'purchase_registered_at_required'
-        | 'purchase_sale_at_required'
-        | 'purchase_event_time_required'
-        | 'purchase_event_time_mismatch'
-        | 'purchase_before_activation_cutover';
+        | 'sale_activation_cutover_required'
+        | 'sale_registered_at_required'
+        | 'sale_sale_at_required'
+        | 'sale_event_time_required'
+        | 'sale_event_time_mismatch'
+        | 'sale_before_activation_cutover';
     };
 
 export function evaluatePurchaseActivationGate(input: {
@@ -71,29 +71,29 @@ export function evaluatePurchaseActivationGate(input: {
     typeof input.activatedAt === 'string' ? input.activatedAt : null,
   );
   if (cut == null) {
-    return { ok: false, reason: 'purchase_activation_cutover_required' };
+    return { ok: false, reason: 'sale_activation_cutover_required' };
   }
   const registeredAtMs = parseExistingTimestampMs(
     input.registeredAt as string | number | Date | null | undefined,
   );
   if (registeredAtMs == null) {
-    return { ok: false, reason: 'purchase_registered_at_required' };
+    return { ok: false, reason: 'sale_registered_at_required' };
   }
   const saleAtMs = parseExistingTimestampMs(
     input.saleAt as string | number | Date | null | undefined,
   );
   if (saleAtMs == null) {
-    return { ok: false, reason: 'purchase_sale_at_required' };
+    return { ok: false, reason: 'sale_sale_at_required' };
   }
   const eventTime =
     typeof input.eventTime === 'number' && Number.isInteger(input.eventTime)
       ? input.eventTime
       : null;
   if (eventTime == null || eventTime < 1_000_000_000) {
-    return { ok: false, reason: 'purchase_event_time_required' };
+    return { ok: false, reason: 'sale_event_time_required' };
   }
   if (eventTime !== Math.floor(saleAtMs / 1000)) {
-    return { ok: false, reason: 'purchase_event_time_mismatch' };
+    return { ok: false, reason: 'sale_event_time_mismatch' };
   }
   return isPurchaseEligibleAfterActivation({
     registeredAtMs,
@@ -101,5 +101,5 @@ export function evaluatePurchaseActivationGate(input: {
     activatedAtMs: cut,
   })
     ? { ok: true }
-    : { ok: false, reason: 'purchase_before_activation_cutover' };
+    : { ok: false, reason: 'sale_before_activation_cutover' };
 }

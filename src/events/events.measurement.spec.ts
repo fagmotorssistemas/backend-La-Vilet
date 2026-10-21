@@ -3,7 +3,8 @@ import { validateSync } from 'class-validator';
 import { EnqueueEventDto } from './dto/enqueue-event.dto';
 import {
   gateAddToWishlist,
-  gatePurchase,
+  gateQualifiedPurchase,
+  gateSale,
   gateViewContent,
 } from '../meta/measurement-event-gates';
 
@@ -23,15 +24,22 @@ describe('measurement enqueue allowlist + gates', () => {
     event_id: '11111111-1111-4111-8111-111111111111',
   };
 
-  it('acepta AddToWishlist y Purchase en DTO', () => {
-    for (const event_name of ['AddToWishlist', 'Purchase', 'ViewContent']) {
+  it('acepta los eventos del contrato en el DTO', () => {
+    for (const event_name of [
+      'AddToWishlist',
+      'Purchase',
+      'ViewContent',
+      'Search',
+      'InitiateCheckout',
+      'VentaCerrada',
+    ]) {
       const { errors } = validateDto({ ...base, event_name });
       expect(errors.filter((e) => e.property === 'event_name')).toHaveLength(0);
     }
   });
 
-  it('rechaza Search', () => {
-    const { errors } = validateDto({ ...base, event_name: 'Search' });
+  it('rechaza eventos fuera del contrato', () => {
+    const { errors } = validateDto({ ...base, event_name: 'AddToCart' });
     expect(errors.some((e) => e.property === 'event_name')).toBe(true);
   });
 
@@ -43,7 +51,7 @@ describe('measurement enqueue allowlist + gates', () => {
     ).toBe(true);
   });
 
-  it('Wishlist / Purchase gates', () => {
+  it('Wishlist / Purchase / VentaCerrada gates', () => {
     expect(
       gateAddToWishlist({
         actionSource: 'website',
@@ -52,7 +60,7 @@ describe('measurement enqueue allowlist + gates', () => {
       }).ok,
     ).toBe(true);
     expect(
-      gatePurchase({
+      gateSale({
         actionSource: 'system_generated',
         saleId: base.event_id,
         leadId: base.event_id,
@@ -60,16 +68,15 @@ describe('measurement enqueue allowlist + gates', () => {
         value: 10,
         currency: null,
       }),
-    ).toEqual({ ok: false, reason: 'purchase_currency_required_iso4217' });
+    ).toEqual({ ok: false, reason: 'sale_currency_required_iso4217' });
     expect(
-      gatePurchase({
-        actionSource: 'website',
-        saleId: base.event_id,
+      gateQualifiedPurchase({
+        actionSource: 'system_generated',
         leadId: base.event_id,
-        unitId: base.event_id,
-        value: 10,
-        currency: 'USD',
       }),
-    ).toEqual({ ok: false, reason: 'purchase_system_generated_crm_only' });
+    ).toEqual({
+      ok: false,
+      reason: 'purchase_is_qualified_contact_use_venta_cerrada',
+    });
   });
 });

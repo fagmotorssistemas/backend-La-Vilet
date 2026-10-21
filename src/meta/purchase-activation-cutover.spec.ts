@@ -63,7 +63,7 @@ describe('purchase activation cutover', () => {
         eventTime: Math.floor(cut / 1000),
         activatedAt,
       }),
-    ).toEqual({ ok: false, reason: 'purchase_registered_at_required' });
+    ).toEqual({ ok: false, reason: 'sale_registered_at_required' });
     expect(
       evaluatePurchaseActivationGate({
         registeredAt: activatedAt,
@@ -71,7 +71,7 @@ describe('purchase activation cutover', () => {
         eventTime: Math.floor(cut / 1000),
         activatedAt,
       }),
-    ).toEqual({ ok: false, reason: 'purchase_sale_at_required' });
+    ).toEqual({ ok: false, reason: 'sale_sale_at_required' });
   });
 
   it('exige que event_time sea la fecha original sale_at en segundos', () => {
@@ -83,7 +83,7 @@ describe('purchase activation cutover', () => {
         eventTime: null,
         activatedAt,
       }),
-    ).toEqual({ ok: false, reason: 'purchase_event_time_required' });
+    ).toEqual({ ok: false, reason: 'sale_event_time_required' });
     expect(
       evaluatePurchaseActivationGate({
         registeredAt: activatedAt,
@@ -91,7 +91,7 @@ describe('purchase activation cutover', () => {
         eventTime: Math.floor(cut / 1000) + 1,
         activatedAt,
       }),
-    ).toEqual({ ok: false, reason: 'purchase_event_time_mismatch' });
+    ).toEqual({ ok: false, reason: 'sale_event_time_mismatch' });
     expect(
       evaluatePurchaseActivationGate({
         registeredAt: activatedAt,

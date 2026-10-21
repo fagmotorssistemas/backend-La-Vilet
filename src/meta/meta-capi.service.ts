@@ -29,12 +29,23 @@ export function isMetaAuthErrorCode(code: number): boolean {
 }
 export type MetaEventName =
   | 'ViewContent'
+  | 'Search'
+  | 'InitiateCheckout'
   | 'Lead'
   | 'Schedule'
   | 'LeadSubmitted'
   | 'QualifiedLead'
   | 'AddToWishlist'
-  | 'Purchase';
+  | 'Purchase'
+  | 'VentaCerrada';
+
+/**
+ * Eventos con value + currency en custom_data: Purchase (contacto calificado,
+ * valor fijo de configuración) y VentaCerrada (importe real del cierre).
+ */
+export function isValuedMetaEvent(eventName: string | null | undefined) {
+  return eventName === 'Purchase' || eventName === 'VentaCerrada';
+}
 
 export type BuildGraphInput = {
   eventName: MetaEventName;
@@ -132,6 +143,66 @@ export class MetaCapiService {
   get waCrmQualificationDeliveryEnabled(): boolean {
     return parseBoolFlag(
       this.config.get<string>('META_WA_CRM_QUALIFICATION_DELIVERY_ENABLED'),
+    );
+  }
+
+  /** Purchase = contacto calificado (web o WhatsApp). Apagado por defecto. */
+  get qualifiedPurchaseDeliveryEnabled(): boolean {
+    return parseBoolFlag(
+      this.config.get<string>('META_QUALIFIED_PURCHASE_DELIVERY_ENABLED'),
+    );
+  }
+
+  /**
+   * Valor fijo que se envía en cada Purchase (contacto calificado). Sin valor
+   * configurado el Purchase no sale: Meta lo exige y no se inventa.
+   */
+  get qualifiedPurchaseValue(): number | null {
+    const raw = String(
+      this.config.get<string>('META_QUALIFIED_PURCHASE_VALUE') || '',
+    ).trim();
+    if (!raw) return null;
+    const value = Number(raw);
+    return Number.isFinite(value) && value > 0
+      ? Math.round(value * 100) / 100
+      : null;
+  }
+
+  get qualifiedPurchaseCurrency(): string | null {
+    const raw = String(
+      this.config.get<string>('META_QUALIFIED_PURCHASE_CURRENCY') || 'USD',
+    )
+      .trim()
+      .toUpperCase();
+    return /^[A-Z]{3}$/.test(raw) ? raw : null;
+  }
+
+  /** VentaCerrada = venta real (solo medición). Apagado por defecto. */
+  get saleDeliveryEnabled(): boolean {
+    return parseBoolFlag(this.config.get<string>('META_SALE_DELIVERY_ENABLED'));
+  }
+
+  get saleActivatedAt(): string | null {
+    return (
+      String(this.config.get<string>('META_SALE_ACTIVATED_AT') || '').trim() ||
+      null
+    );
+  }
+
+  /**
+   * Search e InitiateCheckout (cualquier canal) y ViewContent por WhatsApp.
+   * Apagado por defecto: hasta activarlo se conservan pending, no se envían.
+   */
+  get funnelEventsDeliveryEnabled(): boolean {
+    return parseBoolFlag(
+      this.config.get<string>('META_FUNNEL_EVENTS_DELIVERY_ENABLED'),
+    );
+  }
+
+  /** Cascada: un evento alto encola también los inferiores que falten. */
+  get signalCascadeEnabled(): boolean {
+    return parseBoolFlag(
+      this.config.get<string>('META_SIGNAL_CASCADE_ENABLED'),
     );
   }
 
@@ -247,7 +318,7 @@ export class MetaCapiService {
         const kept: Record<string, unknown> = {};
         const eventName =
           typeof ev?.event_name === 'string' ? ev.event_name : '';
-        if (eventName === 'Purchase') {
+        if (isValuedMetaEvent(eventName)) {
           if (cd.value != null) kept.value = cd.value;
           if (cd.currency != null) kept.currency = cd.currency;
         }
@@ -322,7 +393,7 @@ export class MetaCapiService {
     }
 
     const conservative = this.coreSetupConservative;
-    const isPurchase = input.eventName === 'Purchase';
+    const isPurchase = isValuedMetaEvent(input.eventName);
     const custom: Record<string, unknown> = {};
     // home_listing + content_ids: se construyen siempre; Core Setup los reinyecta
     // tras el strip (igual que Purchase value/currency). name/category solo fuera.

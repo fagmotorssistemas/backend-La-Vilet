@@ -206,6 +206,17 @@ export class SqliteOutboxStore {
         `INSERT OR IGNORE INTO schema_migrations (id) VALUES ('010_outbox_hold_backoff')`,
       )
       .run();
+    this.db.exec(
+      `CREATE INDEX IF NOT EXISTS idx_outbox_lead_event ON outbox_events(lead_id, event_name)`,
+    );
+    this.db.exec(
+      `CREATE INDEX IF NOT EXISTS idx_outbox_visitor_event ON outbox_events(visitor_key, event_name)`,
+    );
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO schema_migrations (id) VALUES ('012_outbox_scope_indexes')`,
+      )
+      .run();
     this.db
       .prepare(
         `INSERT OR IGNORE INTO schema_migrations (id) VALUES ('003_delivery_lane')`,
@@ -859,14 +870,17 @@ export class SqliteOutboxStore {
       excludeSchedule?: boolean;
       excludeLeadSubmitted?: boolean;
       excludeQualifiedLead?: boolean;
-      excludePurchase?: boolean;
+      /** Eventos con entrega apagada: no se reclaman (siguen pending). */
+      excludeEventNames?: string[];
     },
   ): OutboxRow[] {
     const nowIso = new Date().toISOString();
     const excludeSchedule = opts?.excludeSchedule === true;
     const excludeLeadSubmitted = opts?.excludeLeadSubmitted === true;
     const excludeQualifiedLead = opts?.excludeQualifiedLead === true;
-    const excludePurchase = opts?.excludePurchase === true;
+    const excludedNames = JSON.stringify(
+      [...new Set(opts?.excludeEventNames ?? [])].filter(Boolean),
+    );
     const tx = this.db.transaction(() => {
       const rows = this.db
         .prepare(
@@ -877,7 +891,7 @@ export class SqliteOutboxStore {
              AND (@excludeSchedule = 0 OR event_name != 'Schedule')
              AND (@excludeLeadSubmitted = 0 OR event_name != 'LeadSubmitted')
              AND (@excludeQualifiedLead = 0 OR event_name != 'QualifiedLead')
-             AND (@excludePurchase = 0 OR event_name != 'Purchase')
+             AND event_name NOT IN (SELECT value FROM json_each(@excludedNames))
            ORDER BY id ASC
            LIMIT @limit`,
         )
@@ -888,7 +902,7 @@ export class SqliteOutboxStore {
           excludeSchedule: excludeSchedule ? 1 : 0,
           excludeLeadSubmitted: excludeLeadSubmitted ? 1 : 0,
           excludeQualifiedLead: excludeQualifiedLead ? 1 : 0,
-          excludePurchase: excludePurchase ? 1 : 0,
+          excludedNames,
         }) as OutboxRow[];
 
       const claimed: OutboxRow[] = [];
@@ -969,6 +983,49 @@ export class SqliteOutboxStore {
         .run({ id, reason: reason.slice(0, 200), next });
       return result.changes === 1;
     })();
+  }
+
+  /**
+   * ¿Ya existe este evento para la persona (lead, o visitante si no hay lead)
+   * y unidad? Con `sinceHours` mira solo esa ventana; sin ella, toda la cola.
+   * Cuenta cualquier estado: la cascada no reemplaza un evento ya decidido.
+   */
+  hasRecentEventForScope(input: {
+    eventName: string;
+    leadId: string | null;
+    visitorKey: string | null;
+    unitId: string | null;
+    sinceHours: number | null;
+  }): boolean {
+    const lead = String(input.leadId || '').trim() || null;
+    const visitor = String(input.visitorKey || '').trim() || null;
+    if (!lead && !visitor) return false;
+    const row = this.db
+      .prepare(
+        `SELECT 1 AS found FROM outbox_events
+         WHERE event_name = @eventName
+           AND (
+             (@lead IS NOT NULL AND lead_id = @lead)
+             OR (@lead IS NULL AND visitor_key = @visitor)
+           )
+           AND (@unit IS NULL OR json_extract(payload_redacted, '$.unit_id') = @unit)
+           AND (
+             @sinceHours IS NULL
+             OR created_at >= datetime('now', '-' || @sinceHours || ' hours')
+           )
+         LIMIT 1`,
+      )
+      .get({
+        eventName: input.eventName,
+        lead,
+        visitor,
+        unit: String(input.unitId || '').trim() || null,
+        sinceHours:
+          input.sinceHours != null && Number.isFinite(input.sinceHours)
+            ? Math.max(1, Math.floor(input.sinceHours))
+            : null,
+      }) as { found: number } | undefined;
+    return Boolean(row);
   }
 
   getOutboxById(id: number): OutboxRow | undefined {
@@ -1198,24 +1255,23 @@ export class SqliteOutboxStore {
   }
 
   /**
-   * Cancela Purchase no enviados por sale_id (idempotency purchase:{saleId}).
-   * No modifica filas sent (evidencia Graph se conserva).
+   * Cancela la venta real no enviada por sale_id (venta_cerrada:{saleId}, o el
+   * legado purchase:{saleId}). No modifica filas sent (evidencia Graph).
    */
   cancelPurchaseBySaleId(saleId: string, reason: string): number {
     const id = String(saleId || '').trim();
     if (!id) return 0;
-    const key = `purchase:${id}`;
     const result = this.db
       .prepare(
         `UPDATE outbox_events
          SET status = 'cancelled',
              last_error = ?,
              updated_at = datetime('now')
-         WHERE event_name = 'Purchase'
-           AND idempotency_key = ?
+         WHERE event_name IN ('VentaCerrada', 'Purchase')
+           AND idempotency_key IN (?, ?)
            AND status IN ('pending', 'failed', 'processing', 'dead')`,
       )
-      .run(reason.slice(0, 500), key);
+      .run(reason.slice(0, 500), `venta_cerrada:${id}`, `purchase:${id}`);
     return result.changes;
   }
 
@@ -1225,17 +1281,16 @@ export class SqliteOutboxStore {
   annotatePurchaseAnnulledAfterAccept(saleId: string, note: string): number {
     const id = String(saleId || '').trim();
     if (!id) return 0;
-    const key = `purchase:${id}`;
     const result = this.db
       .prepare(
         `UPDATE outbox_events
          SET last_error = ?,
              updated_at = datetime('now')
-         WHERE event_name = 'Purchase'
-           AND idempotency_key = ?
+         WHERE event_name IN ('VentaCerrada', 'Purchase')
+           AND idempotency_key IN (?, ?)
            AND status = 'sent'`,
       )
-      .run(note.slice(0, 500), key);
+      .run(note.slice(0, 500), `venta_cerrada:${id}`, `purchase:${id}`);
     return result.changes;
   }
 

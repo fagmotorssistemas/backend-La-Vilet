@@ -4,7 +4,7 @@ import { DatabaseService } from '../database/database.service';
 import { EventsService } from '../events/events.service';
 import { MetaCapiService } from '../meta/meta-capi.service';
 
-describe('Supabase drain Purchase contract', () => {
+describe('Supabase drain VentaCerrada (venta real) contract', () => {
   const originalFetch = global.fetch;
   afterEach(() => {
     global.fetch = originalFetch;
@@ -63,9 +63,9 @@ describe('Supabase drain Purchase contract', () => {
       }
     ).forwardRow({
       id: 'outbox-row',
-      idempotency_key: 'purchase:11111111-1111-4111-8111-111111111111',
+      idempotency_key: 'venta_cerrada:11111111-1111-4111-8111-111111111111',
       event_id: '22222222-2222-4222-8222-222222222222',
-      event_name: 'Purchase',
+      event_name: 'VentaCerrada',
       event_time: 1_790_112_000,
       status: 'pending',
       delivery_lane: 'live',

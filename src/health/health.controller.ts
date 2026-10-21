@@ -1,11 +1,17 @@
 import { Controller, Get } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { parseBoolFlag } from '../common/utils/env-flags';
+import { readDeliveryFlags } from '../meta/delivery-flags';
 import { MetaCapiService } from '../meta/meta-capi.service';
 import { DatabaseService } from '../database/database.service';
 import { OutboxService } from '../outbox/outbox.service';
 import { SupabaseDrainService } from '../drain/supabase-drain.service';
 import { WhatsappWebhookService } from '../whatsapp/whatsapp-webhook.service';
+
+/** Sustituidas por META_QUALIFIED_PURCHASE_* y META_SALE_* (Purchase ≠ venta). */
+const DEPRECATED_ENV = [
+  'META_PURCHASE_DELIVERY_ENABLED',
+  'META_PURCHASE_ACTIVATED_AT',
+];
 
 @Controller('health')
 export class HealthController {
@@ -17,6 +23,28 @@ export class HealthController {
     private readonly drain: SupabaseDrainService,
     private readonly waWebhook: WhatsappWebhookService,
   ) {}
+
+  private deliverySwitches() {
+    const flags = readDeliveryFlags(this.config);
+    return {
+      schedule_delivery_enabled: flags.schedule,
+      wa_lead_submitted_delivery_enabled: flags.waLeadSubmitted,
+      wa_crm_qualification_delivery_enabled: flags.waCrmQualification,
+      /** Purchase = contacto calificado (web o WhatsApp). */
+      qualified_purchase_delivery_enabled: flags.qualifiedPurchase,
+      qualified_purchase_value_configured:
+        this.meta.qualifiedPurchaseValue != null,
+      /** VentaCerrada = venta real (solo medición). */
+      sale_delivery_enabled: flags.sale,
+      sale_activated_at: this.meta.saleActivatedAt,
+      funnel_events_delivery_enabled: flags.funnel,
+      signal_cascade_enabled: this.meta.signalCascadeEnabled,
+      /** Variables antiguas sin efecto: revisar el .env si aparecen. */
+      deprecated_env_present: DEPRECATED_ENV.filter((key) =>
+        String(this.config.get<string>(key) || '').trim(),
+      ),
+    };
+  }
 
   @Get()
   getHealth() {
@@ -38,21 +66,8 @@ export class HealthController {
         this.meta.assertModeAllowed().ok &&
         Boolean(this.meta.waMessagingAccessToken),
       core_setup_conservative: this.meta.coreSetupConservative,
-      purchase_delivery_enabled: parseBoolFlag(
-        this.config.get<string>('META_PURCHASE_DELIVERY_ENABLED'),
-      ),
-      purchase_activated_at:
-        String(
-          this.config.get<string>('META_PURCHASE_ACTIVATED_AT') || '',
-        ).trim() || null,
-      wa_crm_qualification_delivery_enabled:
-        this.meta.waCrmQualificationDeliveryEnabled,
-      schedule_delivery_enabled: parseBoolFlag(
-        this.config.get<string>('META_SCHEDULE_DELIVERY_ENABLED'),
-      ),
-      wa_lead_submitted_delivery_enabled: parseBoolFlag(
-        this.config.get<string>('META_WA_LEAD_SUBMITTED_DELIVERY_ENABLED'),
-      ),
+      // Interruptores de entrega: misma lectura que worker y drain.
+      ...this.deliverySwitches(),
       persistence: {
         database_path: this.db.databasePath,
       },

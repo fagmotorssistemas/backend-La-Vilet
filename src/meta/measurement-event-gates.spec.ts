@@ -1,7 +1,10 @@
 import {
   gateAddToWishlist,
   gateHomeListingContent,
-  gatePurchase,
+  gateInitiateCheckout,
+  gateQualifiedPurchase,
+  gateSale,
+  gateSearch,
   gateViewContent,
   normalizeCurrency,
   resolveHomeListingContent,
@@ -124,48 +127,112 @@ describe('measurement-event-gates', () => {
     ).toBe(false);
   });
 
-  it('Purchase exige system_generated + currency / value / sale_id', () => {
+  it('VentaCerrada (venta real) exige system_generated + currency / value / sale_id', () => {
+    const base = {
+      actionSource: 'system_generated',
+      saleId: 's1',
+      leadId: 'l1',
+      unitId: 'u1',
+      value: 100,
+      currency: 'USD',
+    };
+    expect(gateSale(base)).toEqual({ ok: true });
+    expect(gateSale({ ...base, actionSource: 'website' })).toEqual({
+      ok: false,
+      reason: 'sale_system_generated_crm_only',
+    });
+    expect(gateSale({ ...base, saleId: '' })).toEqual({
+      ok: false,
+      reason: 'sale_sale_id_required',
+    });
+    expect(gateSale({ ...base, unitId: null })).toEqual({
+      ok: false,
+      reason: 'sale_unit_id_required',
+    });
+    expect(gateSale({ ...base, currency: null })).toEqual({
+      ok: false,
+      reason: 'sale_currency_required_iso4217',
+    });
+    expect(gateSale({ ...base, value: 0 })).toEqual({
+      ok: false,
+      reason: 'sale_value_required',
+    });
+    expect(normalizeCurrency('usd')).toBe('USD');
+    expect(normalizeCurrency('$')).toBeNull();
+  });
+
+  it('Purchase = contacto calificado: web o WhatsApp, con lead', () => {
     expect(
-      gatePurchase({
-        actionSource: 'system_generated',
-        saleId: 's1',
+      gateQualifiedPurchase({ actionSource: 'website', leadId: 'l1' }),
+    ).toEqual({ ok: true });
+    expect(
+      gateQualifiedPurchase({
+        actionSource: 'business_messaging',
         leadId: 'l1',
-        unitId: 'u1',
-        value: 100,
-        currency: 'USD',
       }),
     ).toEqual({ ok: true });
     expect(
-      gatePurchase({
+      gateQualifiedPurchase({ actionSource: 'system_generated', leadId: 'l1' }),
+    ).toEqual({
+      ok: false,
+      reason: 'purchase_is_qualified_contact_use_venta_cerrada',
+    });
+    expect(
+      gateQualifiedPurchase({ actionSource: 'chat', leadId: 'l1' }),
+    ).toEqual({ ok: false, reason: 'purchase_website_or_whatsapp_only' });
+    expect(
+      gateQualifiedPurchase({ actionSource: 'website', leadId: null }),
+    ).toEqual({ ok: false, reason: 'purchase_lead_id_required' });
+  });
+
+  it('InitiateCheckout exige unidad y canal web o WhatsApp', () => {
+    expect(
+      gateInitiateCheckout({ actionSource: 'website', unitId: unitId }),
+    ).toEqual({ ok: true });
+    expect(
+      gateInitiateCheckout({ actionSource: 'business_messaging', unitId }),
+    ).toEqual({ ok: true });
+    expect(
+      gateInitiateCheckout({ actionSource: 'website', unitId: null }),
+    ).toEqual({ ok: false, reason: 'initiate_checkout_unit_id_required' });
+    expect(
+      gateInitiateCheckout({ actionSource: 'system_generated', unitId }),
+    ).toEqual({
+      ok: false,
+      reason: 'initiate_checkout_website_or_whatsapp_only',
+    });
+  });
+
+  it('Search: solo web, con 1 a 10 unidades del listado', () => {
+    expect(
+      gateSearch({ actionSource: 'website', contentIds: [unitId] }),
+    ).toEqual({ ok: true });
+    expect(gateSearch({ actionSource: 'website', contentIds: [] })).toEqual({
+      ok: false,
+      reason: 'search_content_ids_required',
+    });
+    expect(
+      gateSearch({
         actionSource: 'website',
-        saleId: 's1',
-        leadId: 'l1',
-        unitId: 'u1',
-        value: 100,
-        currency: 'USD',
+        contentIds: Array.from({ length: 11 }, (_, i) => `u${i}`),
       }),
-    ).toEqual({ ok: false, reason: 'purchase_system_generated_crm_only' });
+    ).toEqual({ ok: false, reason: 'search_too_many_content_ids' });
     expect(
-      gatePurchase({
-        actionSource: 'system_generated',
-        saleId: 's1',
-        leadId: 'l1',
-        unitId: 'u1',
-        value: 100,
-        currency: null,
-      }),
-    ).toEqual({ ok: false, reason: 'purchase_currency_required_iso4217' });
+      gateSearch({ actionSource: 'business_messaging', contentIds: [unitId] }),
+    ).toEqual({ ok: false, reason: 'search_website_only' });
     expect(
-      gatePurchase({
-        actionSource: 'system_generated',
-        saleId: 's1',
-        leadId: 'l1',
-        unitId: 'u1',
-        value: 0,
-        currency: 'USD',
+      resolveHomeListingContent({
+        eventName: 'Search',
+        contentIds: [unitId, unitId, ' '],
       }),
-    ).toEqual({ ok: false, reason: 'purchase_value_required' });
-    expect(normalizeCurrency('usd')).toBe('USD');
-    expect(normalizeCurrency('$')).toBeNull();
+    ).toEqual({ contentType: 'home_listing', contentIds: [unitId] });
+    expect(
+      gateHomeListingContent({
+        eventName: 'Search',
+        contentType: 'home_listing',
+        contentIds: [unitId, 'otra'],
+        unitId: null,
+      }),
+    ).toEqual({ ok: true });
   });
 });

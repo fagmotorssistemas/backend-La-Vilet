@@ -1,10 +1,11 @@
 /**
- * Purchase tipado + delivery OFF: claim no envía; no libera review_hold histórico.
+ * Entrega OFF de Purchase (contacto calificado) y VentaCerrada (venta real):
+ * claim no las toma y quedan pending; Lead sigue.
  */
 import Database from 'better-sqlite3';
 import { SqliteOutboxStore } from '../database/sqlite-store';
 
-describe('claimPending — Purchase delivery gate', () => {
+describe('claimPending — exclusión por evento con entrega apagada', () => {
   let db: Database.Database;
   let store: SqliteOutboxStore;
 
@@ -18,7 +19,7 @@ describe('claimPending — Purchase delivery gate', () => {
     db.close();
   });
 
-  it('excludePurchase conserva Purchase pending y deja pasar Lead', () => {
+  it('excludeEventNames conserva Purchase y VentaCerrada pending y deja pasar Lead', () => {
     store.insertOutbox({
       idempotency_key: 'lead:web',
       event_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
@@ -53,8 +54,22 @@ describe('claimPending — Purchase delivery gate', () => {
       ads_consent_required: true,
     });
 
+    store.insertOutbox({
+      idempotency_key: 'venta_cerrada:sale-1',
+      event_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      event_name: 'VentaCerrada',
+      event_time: 1,
+      payload_redacted: { event_name: 'VentaCerrada' },
+      graph_payload: { data: [{ event_name: 'VentaCerrada' }] },
+      dataset_id: 'WEB_DS',
+      delivery_lane: 'live',
+      visitor_key: null,
+      lead_id: 'lead-1',
+      ads_consent_required: true,
+    });
+
     const claimed = store.claimPending(10, 'live', {
-      excludePurchase: true,
+      excludeEventNames: ['Purchase', 'VentaCerrada'],
     });
     expect(claimed.map((r) => r.event_name)).toEqual(['Lead']);
 
@@ -68,5 +83,11 @@ describe('claimPending — Purchase delivery gate', () => {
     };
     expect(still.event_name).toBe('Purchase');
     expect(still.status).toBe('pending');
+    // Al encender la entrega, ambas se reclaman.
+    expect(
+      store
+        .claimPending(10, 'live', { excludeEventNames: [] })
+        .map((r) => r.event_name),
+    ).toEqual(['Purchase', 'VentaCerrada']);
   });
 });

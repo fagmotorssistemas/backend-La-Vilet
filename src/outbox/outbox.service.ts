@@ -7,7 +7,13 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { createHash } from 'crypto';
 import { parseBoolFlag } from '../common/utils/env-flags';
-import { DatabaseService } from '../database/database.service';
+import {
+  deliveryInactiveReason,
+  inactiveEventNames,
+  readDeliveryFlags,
+  type DeliveryFlags,
+} from '../meta/delivery-flags';
+import { DatabaseService, type OutboxRow } from '../database/database.service';
 import { MetaCapiService } from '../meta/meta-capi.service';
 import {
   countGraphPayloadEvents,
@@ -53,6 +59,16 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
       return;
     }
     this.enabled = true;
+    for (const key of [
+      'META_PURCHASE_DELIVERY_ENABLED',
+      'META_PURCHASE_ACTIVATED_AT',
+    ]) {
+      if (String(this.config.get<string>(key) || '').trim()) {
+        this.logger.warn(
+          `${key} ya no tiene efecto: Purchase es el contacto calificado (META_QUALIFIED_PURCHASE_*) y la venta real es VentaCerrada (META_SALE_*)`,
+        );
+      }
+    }
     const poll = Number(this.config.get('OUTBOX_POLL_MS')) || 5000;
     this.timer = setInterval(() => {
       void this.tick();
@@ -85,277 +101,24 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
       const batch = Number(this.config.get('OUTBOX_BATCH_SIZE')) || 20;
       const maxAttempts = Number(this.config.get('OUTBOX_MAX_ATTEMPTS')) || 8;
       const lane = this.meta.mode === 'test' ? 'test' : 'live';
-      const scheduleDeliveryOn = this.isScheduleDeliveryEnabled();
-      const waLeadSubmittedDeliveryOn = this.isWaLeadSubmittedDeliveryEnabled();
-      const waCrmQualificationDeliveryOn =
-        this.isWaCrmQualificationDeliveryEnabled();
-      const purchaseDeliveryOn = this.isPurchaseDeliveryEnabled();
-      // Delivery OFF: no claim Schedule / LeadSubmitted / Purchase → no se envían ni se pierden.
+      const flags = readDeliveryFlags(this.config);
+      // Entrega OFF: no se reclaman → no se envían ni se pierden (siguen pending).
       const claimed = this.db.claimPending(batch, lane, {
-        excludeSchedule: !scheduleDeliveryOn,
-        excludeLeadSubmitted: !waLeadSubmittedDeliveryOn,
-        excludeQualifiedLead: !waCrmQualificationDeliveryOn,
-        excludePurchase: !purchaseDeliveryOn,
+        excludeEventNames: inactiveEventNames(flags),
       });
 
       for (const row of claimed) {
-        const fresh = this.db.getOutboxById(row.id);
-        if (!fresh || fresh.status !== 'processing') {
-          continue;
-        }
-        if (
-          fresh.ads_consent_required &&
-          this.db.isConsentRevoked({
-            visitorKey: fresh.visitor_key,
-            leadId: fresh.lead_id,
-          })
-        ) {
-          this.db.cancelProcessingIfRevoked(row.id);
-          continue;
-        }
-
-        // LeadSubmitted: solo false cancela; null/ausente permiten (fuente leads) + scope.
-        // Otros eventos: solo cancelan si consent === false (comportamiento previo).
-        if (['LeadSubmitted', 'QualifiedLead'].includes(fresh.event_name)) {
-          const gate = await this.resolveLeadSubmittedConsentGate(fresh);
-          if (gate.action === 'cancel_revoked') {
-            this.db.cancelProcessingIfRevoked(row.id);
-            this.logger.log(
-              `outbox cancel ${gate.reason} id=${row.id} event=LeadSubmitted`,
-            );
-            continue;
-          }
-          if (gate.action === 'hold_pending') {
-            this.db.releaseProcessingToPending(row.id, gate.reason);
-            this.logger.log(
-              `outbox hold ${gate.reason} id=${row.id} (conservado pending)`,
-            );
-            continue;
-          }
-        } else if (fresh.ads_consent_required && fresh.lead_id) {
-          const leadConsentFalse = await this.supabaseLeadAdsConsentFalse(
-            fresh.lead_id,
-          );
-          if (leadConsentFalse === true) {
-            this.db.cancelProcessingIfRevoked(row.id);
-            this.logger.log(
-              `outbox cancel ads_consent_revoked_pre_graph id=${row.id}`,
-            );
-            continue;
-          }
-        }
-
-        if (fresh.event_name === 'Schedule' && !scheduleDeliveryOn) {
-          this.db.releaseProcessingToPending(
-            row.id,
-            'schedule_delivery_inactive',
-          );
-          this.logger.log(
-            `outbox skip schedule_delivery_inactive id=${row.id} (conservado pending)`,
-          );
-          continue;
-        }
-
-        if (
-          fresh.event_name === 'LeadSubmitted' &&
-          !waLeadSubmittedDeliveryOn
-        ) {
-          this.db.releaseProcessingToPending(
-            row.id,
-            'wa_lead_submitted_delivery_inactive',
-          );
-          this.logger.log(
-            `outbox skip wa_lead_submitted_delivery_inactive id=${row.id} (conservado pending)`,
-          );
-          continue;
-        }
-
-        if (
-          fresh.event_name === 'QualifiedLead' &&
-          !waCrmQualificationDeliveryOn
-        ) {
-          this.db.releaseProcessingToPending(
-            row.id,
-            'wa_crm_qualification_delivery_inactive',
-          );
-          continue;
-        }
-
-        if (fresh.event_name === 'Purchase' && !purchaseDeliveryOn) {
-          this.db.releaseProcessingToPending(
-            row.id,
-            'purchase_delivery_inactive',
-          );
-          this.logger.log(
-            `outbox skip purchase_delivery_inactive id=${row.id} (conservado pending)`,
-          );
-          continue;
-        }
-
-        if (fresh.event_name === 'Purchase' && purchaseDeliveryOn) {
-          const cutoverGate = this.purchaseActivationGate(fresh);
-          if (!cutoverGate.ok) {
-            this.db.releaseProcessingToPending(row.id, cutoverGate.reason);
-            this.logger.log(`outbox hold ${cutoverGate.reason} id=${row.id}`);
-            continue;
-          }
-          const gate = await this.resolvePurchaseAnnulmentGate(fresh);
-          if (gate.action === 'cancel') {
-            this.db.cancelByEventIds([fresh.event_id], gate.reason);
-            this.logger.log(
-              `outbox cancel purchase ${gate.reason} id=${row.id}`,
-            );
-            continue;
-          }
-          if (gate.action === 'hold_retry') {
-            this.db.releaseProcessingToPending(row.id, gate.reason);
-            this.logger.log(`outbox hold purchase ${gate.reason} id=${row.id}`);
-            continue;
-          }
-          if (gate.action === 'annotate_after_accept') {
-            const saleId = saleIdFromPurchaseRow(fresh);
-            if (saleId) {
-              this.db.annotatePurchaseAnnulledAfterAccept(saleId, gate.reason);
-            }
-            this.db.releaseProcessingToPending(row.id, gate.reason);
-            continue;
-          }
-        }
-
-        let payload = JSON.parse(fresh.graph_payload) as Record<
-          string,
-          unknown
-        >;
-        payload = this.meta.applyCoreSetupBeforeGraphSend(payload);
-        if (this.meta.mode === 'test' && this.meta.testEventCode) {
-          payload.test_event_code = this.meta.testEventCode;
-        } else {
-          delete payload.test_event_code;
-        }
-
-        const credentialGate = this.meta.assertSendAllowedFor(
-          payload,
-          fresh.event_name,
-        );
-        if (!credentialGate.ok) {
-          this.db.releaseProcessingToPending(row.id, credentialGate.reason);
-          this.logger.log(
-            `outbox hold credential id=${row.id} event=${fresh.event_name}`,
-          );
-          continue;
-        }
-
-        const expectedEvents = countGraphPayloadEvents(payload);
-        const result = await this.meta.sendToMeta(fresh.dataset_id, payload, {
-          eventName: fresh.event_name,
-        });
-
-        if (!result.ok && result.authError) {
-          // Token caducado/revocado o sin permisos: el evento no tiene la culpa.
-          // Se conserva pending (sin contar intento) hasta corregir la credencial.
-          const errorCode = result.bodyRedacted.error_code;
-          const code =
-            typeof errorCode === 'number'
-              ? String(errorCode)
-              : `http_${result.httpStatus}`;
-          this.db.releaseProcessingToPending(
-            row.id,
-            `meta_auth_error:${code}`,
-            { retryAfterSec: META_AUTH_HOLD_SEC },
-          );
+        try {
+          await this.processClaimedRow(row, flags, maxAttempts);
+        } catch (error) {
+          // Un fallo inesperado (p. ej. payload corrupto) no deja el resto del
+          // lote en processing: la fila vuelve a pending con espera.
+          this.db.releaseProcessingToPending(row.id, 'worker_row_error');
           this.logger.error(
-            `outbox hold meta_auth_error code=${code} id=${row.id} event=${fresh.event_name}`,
-          );
-          continue;
-        }
-
-        const evidence = evaluateMetaAcceptanceEvidence({
-          httpOk: result.httpStatus >= 200 && result.httpStatus < 300,
-          httpStatus: result.httpStatus,
-          error: result.ok ? undefined : result.errorMessage || 'meta_error',
-          eventsReceived: result.eventsReceived,
-          expectedEvents,
-          eventId: fresh.event_id,
-          fbtraceId: result.fbtraceId,
-        });
-
-        if (result.ok && evidence.tier === 'api_accepted') {
-          const syncPayload = this.metaResultSyncPayload({
-            stage: 'meta_accepted',
-            eventName: fresh.event_name,
-            eventId: fresh.event_id,
-            leadId: fresh.lead_id,
-            idempotencyKey: fresh.idempotency_key,
-            deliveryLane: fresh.delivery_lane,
-            datasetId: fresh.dataset_id,
-            fbtraceId: result.fbtraceId,
-            eventsReceived: result.eventsReceived,
-            httpStatus: result.httpStatus,
-            expectedEvents,
-            correlated: evidence.correlated,
-          });
-          if (typeof this.db.markSentAndQueueResult === 'function') {
-            this.db.markSentAndQueueResult(
-              row.id,
-              result.bodyRedacted,
-              syncPayload,
-            );
-          } else {
-            // Compatibilidad de dobles de prueba antiguos; DatabaseService real
-            // siempre expone la operación atómica.
-            this.db.markSent(row.id, result.bodyRedacted);
-          }
-          continue;
-        }
-
-        const attempts = fresh.attempt_count;
-        const dead = !result.retryable || attempts >= maxAttempts;
-        const backoffSec = Math.min(
-          3600,
-          Math.pow(2, Math.min(attempts, 8)) * 5,
-        );
-        const next = new Date(Date.now() + backoffSec * 1000).toISOString();
-        const deliveryOutcome = result.ok
-          ? 'meta_unverified'
-          : result.httpStatus === 0
-            ? 'transport_failed'
-            : 'meta_rejected';
-        const syncPayload = this.metaResultSyncPayload({
-          stage: deliveryOutcome,
-          eventName: fresh.event_name,
-          eventId: fresh.event_id,
-          leadId: fresh.lead_id,
-          idempotencyKey: fresh.idempotency_key,
-          deliveryLane: fresh.delivery_lane,
-          datasetId: fresh.dataset_id,
-          fbtraceId: result.fbtraceId,
-          eventsReceived: result.eventsReceived,
-          httpStatus: result.httpStatus,
-          expectedEvents,
-          correlated: evidence.correlated,
-          reason: result.errorMessage || evidence.reason || 'unknown',
-        });
-        if (typeof this.db.markRetryAndQueueResult === 'function') {
-          this.db.markRetryAndQueueResult(
-            row.id,
-            result.errorMessage || evidence.reason || 'unknown',
-            next,
-            dead,
-            deliveryOutcome,
-            result.bodyRedacted,
-            syncPayload,
-          );
-        } else {
-          this.db.markRetry(
-            row.id,
-            result.errorMessage || evidence.reason || 'unknown',
-            next,
-            dead,
+            `outbox row error id=${row.id} event=${row.event_name}`,
+            error instanceof Error ? error.stack : error,
           );
         }
-        this.logger.warn(
-          `outbox id=${row.id} event=${row.event_name} attempt=${attempts} dead=${dead}`,
-        );
       }
 
       const retention = Number(this.config.get('OUTBOX_RETENTION_DAYS')) || 90;
@@ -375,36 +138,273 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private isScheduleDeliveryEnabled() {
-    return parseBoolFlag(
-      this.config.get<string>('META_SCHEDULE_DELIVERY_ENABLED'),
-    );
-  }
+  private async processClaimedRow(
+    row: OutboxRow,
+    flags: DeliveryFlags,
+    maxAttempts: number,
+  ): Promise<void> {
+    const fresh = this.db.getOutboxById(row.id);
+    if (!fresh || fresh.status !== 'processing') {
+      return;
+    }
+    if (
+      fresh.ads_consent_required &&
+      this.db.isConsentRevoked({
+        visitorKey: fresh.visitor_key,
+        leadId: fresh.lead_id,
+      })
+    ) {
+      this.db.cancelProcessingIfRevoked(row.id);
+      return;
+    }
 
-  private isWaLeadSubmittedDeliveryEnabled() {
-    return parseBoolFlag(
-      this.config.get<string>('META_WA_LEAD_SUBMITTED_DELIVERY_ENABLED'),
-    );
-  }
+    let payload = JSON.parse(fresh.graph_payload) as Record<string, unknown>;
+    const actionSource = firstGraphEventField(payload, 'action_source');
 
-  private isWaCrmQualificationDeliveryEnabled() {
-    return parseBoolFlag(
-      this.config.get<string>('META_WA_CRM_QUALIFICATION_DELIVERY_ENABLED'),
-    );
-  }
+    // Mensajería (WhatsApp): solo false cancela; null/ausente permiten (fuente
+    // leads) + scope. Web: solo cancelan si consent === false.
+    if (
+      actionSource === 'business_messaging' ||
+      ['LeadSubmitted', 'QualifiedLead'].includes(fresh.event_name)
+    ) {
+      const gate = await this.resolveLeadSubmittedConsentGate(fresh);
+      if (gate.action === 'cancel_revoked') {
+        this.db.cancelProcessingIfRevoked(row.id);
+        this.logger.log(
+          `outbox cancel ${gate.reason} id=${row.id} event=${fresh.event_name}`,
+        );
+        return;
+      }
+      if (gate.action === 'hold_pending') {
+        this.db.releaseProcessingToPending(row.id, gate.reason);
+        this.logger.log(
+          `outbox hold ${gate.reason} id=${row.id} (conservado pending)`,
+        );
+        return;
+      }
+    } else if (fresh.ads_consent_required && fresh.lead_id) {
+      const leadConsentFalse = await this.supabaseLeadAdsConsentFalse(
+        fresh.lead_id,
+      );
+      if (leadConsentFalse === true) {
+        this.db.cancelProcessingIfRevoked(row.id);
+        this.logger.log(
+          `outbox cancel ads_consent_revoked_pre_graph id=${row.id}`,
+        );
+        return;
+      }
+    }
 
-  /** Purchase tipado; envío Graph apagado por defecto hasta activación explícita. */
-  private isPurchaseDeliveryEnabled() {
-    return parseBoolFlag(
-      this.config.get<string>('META_PURCHASE_DELIVERY_ENABLED'),
+    const inactive = deliveryInactiveReason(
+      fresh.event_name,
+      actionSource,
+      flags,
+    );
+    if (inactive) {
+      this.db.releaseProcessingToPending(row.id, inactive);
+      this.logger.log(
+        `outbox skip ${inactive} id=${row.id} (conservado pending)`,
+      );
+      return;
+    }
+
+    // VentaCerrada (venta real): corte de activación + anulación CRM.
+    if (fresh.event_name === 'VentaCerrada') {
+      const cutoverGate = this.saleActivationGate(fresh);
+      if (!cutoverGate.ok) {
+        this.db.releaseProcessingToPending(row.id, cutoverGate.reason);
+        this.logger.log(`outbox hold ${cutoverGate.reason} id=${row.id}`);
+        return;
+      }
+      const gate = await this.resolveSaleAnnulmentGate(fresh);
+      if (gate.action === 'cancel') {
+        this.db.cancelByEventIds([fresh.event_id], gate.reason);
+        this.logger.log(`outbox cancel sale ${gate.reason} id=${row.id}`);
+        return;
+      }
+      if (gate.action === 'hold_retry') {
+        this.db.releaseProcessingToPending(row.id, gate.reason);
+        this.logger.log(`outbox hold sale ${gate.reason} id=${row.id}`);
+        return;
+      }
+      if (gate.action === 'annotate_after_accept') {
+        const saleId = saleIdFromPurchaseRow(fresh);
+        if (saleId) {
+          this.db.annotatePurchaseAnnulledAfterAccept(saleId, gate.reason);
+        }
+        this.db.releaseProcessingToPending(row.id, gate.reason);
+        return;
+      }
+    }
+
+    payload = this.meta.applyCoreSetupBeforeGraphSend(payload);
+    // Purchase (contacto calificado): valor fijo vigente en configuración.
+    if (
+      fresh.event_name === 'Purchase' &&
+      !this.applyQualifiedPurchaseValue(payload)
+    ) {
+      this.db.releaseProcessingToPending(
+        row.id,
+        'qualified_purchase_value_not_configured',
+        { retryAfterSec: 3600 },
+      );
+      this.logger.warn(
+        `outbox hold qualified_purchase_value_not_configured id=${row.id}`,
+      );
+      return;
+    }
+    if (this.meta.mode === 'test' && this.meta.testEventCode) {
+      payload.test_event_code = this.meta.testEventCode;
+    } else {
+      delete payload.test_event_code;
+    }
+
+    const credentialGate = this.meta.assertSendAllowedFor(
+      payload,
+      fresh.event_name,
+    );
+    if (!credentialGate.ok) {
+      this.db.releaseProcessingToPending(row.id, credentialGate.reason);
+      this.logger.log(
+        `outbox hold credential id=${row.id} event=${fresh.event_name}`,
+      );
+      return;
+    }
+
+    const expectedEvents = countGraphPayloadEvents(payload);
+    const result = await this.meta.sendToMeta(fresh.dataset_id, payload, {
+      eventName: fresh.event_name,
+    });
+
+    if (!result.ok && result.authError) {
+      // Token caducado/revocado o sin permisos: el evento no tiene la culpa.
+      // Se conserva pending (sin contar intento) hasta corregir la credencial.
+      const errorCode = result.bodyRedacted.error_code;
+      const code =
+        typeof errorCode === 'number'
+          ? String(errorCode)
+          : `http_${result.httpStatus}`;
+      this.db.releaseProcessingToPending(row.id, `meta_auth_error:${code}`, {
+        retryAfterSec: META_AUTH_HOLD_SEC,
+      });
+      this.logger.error(
+        `outbox hold meta_auth_error code=${code} id=${row.id} event=${fresh.event_name}`,
+      );
+      return;
+    }
+
+    const evidence = evaluateMetaAcceptanceEvidence({
+      httpOk: result.httpStatus >= 200 && result.httpStatus < 300,
+      httpStatus: result.httpStatus,
+      error: result.ok ? undefined : result.errorMessage || 'meta_error',
+      eventsReceived: result.eventsReceived,
+      expectedEvents,
+      eventId: fresh.event_id,
+      fbtraceId: result.fbtraceId,
+    });
+
+    if (result.ok && evidence.tier === 'api_accepted') {
+      const syncPayload = this.metaResultSyncPayload({
+        stage: 'meta_accepted',
+        eventName: fresh.event_name,
+        eventId: fresh.event_id,
+        leadId: fresh.lead_id,
+        idempotencyKey: fresh.idempotency_key,
+        deliveryLane: fresh.delivery_lane,
+        datasetId: fresh.dataset_id,
+        fbtraceId: result.fbtraceId,
+        eventsReceived: result.eventsReceived,
+        httpStatus: result.httpStatus,
+        expectedEvents,
+        correlated: evidence.correlated,
+      });
+      if (typeof this.db.markSentAndQueueResult === 'function') {
+        this.db.markSentAndQueueResult(
+          row.id,
+          result.bodyRedacted,
+          syncPayload,
+        );
+      } else {
+        // Compatibilidad de dobles de prueba antiguos; DatabaseService real
+        // siempre expone la operación atómica.
+        this.db.markSent(row.id, result.bodyRedacted);
+      }
+      return;
+    }
+
+    const attempts = fresh.attempt_count;
+    const dead = !result.retryable || attempts >= maxAttempts;
+    const backoffSec = Math.min(3600, Math.pow(2, Math.min(attempts, 8)) * 5);
+    const next = new Date(Date.now() + backoffSec * 1000).toISOString();
+    const deliveryOutcome = result.ok
+      ? 'meta_unverified'
+      : result.httpStatus === 0
+        ? 'transport_failed'
+        : 'meta_rejected';
+    const syncPayload = this.metaResultSyncPayload({
+      stage: deliveryOutcome,
+      eventName: fresh.event_name,
+      eventId: fresh.event_id,
+      leadId: fresh.lead_id,
+      idempotencyKey: fresh.idempotency_key,
+      deliveryLane: fresh.delivery_lane,
+      datasetId: fresh.dataset_id,
+      fbtraceId: result.fbtraceId,
+      eventsReceived: result.eventsReceived,
+      httpStatus: result.httpStatus,
+      expectedEvents,
+      correlated: evidence.correlated,
+      reason: result.errorMessage || evidence.reason || 'unknown',
+    });
+    if (typeof this.db.markRetryAndQueueResult === 'function') {
+      this.db.markRetryAndQueueResult(
+        row.id,
+        result.errorMessage || evidence.reason || 'unknown',
+        next,
+        dead,
+        deliveryOutcome,
+        result.bodyRedacted,
+        syncPayload,
+      );
+    } else {
+      this.db.markRetry(
+        row.id,
+        result.errorMessage || evidence.reason || 'unknown',
+        next,
+        dead,
+      );
+    }
+    this.logger.warn(
+      `outbox id=${row.id} event=${row.event_name} attempt=${attempts} dead=${dead}`,
     );
   }
 
   /**
-   * Corte: registered_at (CRM) Y sale_at (confirmación comercial existente).
-   * Ambos deben ser >= META_PURCHASE_ACTIVATED_AT. No inventa fechas.
+   * Inyecta en cada evento el valor fijo configurado para el contacto
+   * calificado. Devuelve false si no hay valor/moneda: el evento se retiene.
    */
-  private purchaseActivationGate(row: {
+  private applyQualifiedPurchaseValue(payload: Record<string, unknown>) {
+    const value = this.meta.qualifiedPurchaseValue;
+    const currency = this.meta.qualifiedPurchaseCurrency;
+    const events = Array.isArray(payload.data)
+      ? (payload.data as Array<Record<string, unknown>>)
+      : [];
+    if (value == null || !currency || !events.length) return false;
+    for (const event of events) {
+      const custom =
+        event.custom_data && typeof event.custom_data === 'object'
+          ? (event.custom_data as Record<string, unknown>)
+          : {};
+      event.custom_data = { ...custom, value, currency };
+    }
+    return true;
+  }
+
+  /**
+   * Corte de VentaCerrada: registered_at (CRM) Y sale_at (confirmación
+   * comercial existente). Ambos deben ser >= META_SALE_ACTIVATED_AT.
+   */
+  private saleActivationGate(row: {
     created_at: string;
     event_time: number;
     payload_redacted: string | null;
@@ -436,7 +436,7 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
       registeredAt,
       saleAt,
       eventTime: row.event_time,
-      activatedAt: this.config.get<string>('META_PURCHASE_ACTIVATED_AT'),
+      activatedAt: this.meta.saleActivatedAt,
     });
   }
 
@@ -444,7 +444,7 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
    * Valida anulación CRM antes de Graph y en reintentos.
    * Sin SUPABASE_* → hold (no enviar a ciegas).
    */
-  private async resolvePurchaseAnnulmentGate(row: {
+  private async resolveSaleAnnulmentGate(row: {
     idempotency_key: string;
     payload_redacted: string | null;
     status: string;
@@ -757,6 +757,17 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
       }
     }
   }
+}
+
+function firstGraphEventField(
+  payload: Record<string, unknown>,
+  field: string,
+): string | null {
+  const first = Array.isArray(payload.data)
+    ? (payload.data[0] as Record<string, unknown> | undefined)
+    : undefined;
+  const value = first?.[field];
+  return typeof value === 'string' ? value : null;
 }
 
 /** Espera antes de reintentar tras un error de credencial de Meta. */

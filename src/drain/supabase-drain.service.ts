@@ -11,6 +11,11 @@ import { plainToInstance } from 'class-transformer';
 import { validateSync } from 'class-validator';
 import { randomUUID } from 'crypto';
 import { parseBoolFlag } from '../common/utils/env-flags';
+import {
+  deliveryInactiveReason,
+  inactiveEventNames,
+  readDeliveryFlags,
+} from '../meta/delivery-flags';
 import { DatabaseService } from '../database/database.service';
 import { holdBackoffSeconds } from '../database/sqlite-store';
 import { EnqueueEventDto } from '../events/dto/enqueue-event.dto';
@@ -31,7 +36,10 @@ type SupabaseOutboxRow = {
     | 'LeadSubmitted'
     | 'QualifiedLead'
     | 'AddToWishlist'
-    | 'Purchase';
+    | 'Purchase'
+    | 'Search'
+    | 'InitiateCheckout'
+    | 'VentaCerrada';
   event_time: number;
   payload: Record<string, unknown>;
   status: string;
@@ -201,14 +209,23 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
       );
       return 'held';
     }
-    // Flujos con entrega apagada ya se excluyen en la consulta; defensa extra.
-    const inactive = this.inactiveDeliveryReason(row.event_name);
+    // Flujos con entrega apagada ya se excluyen en la consulta; defensa extra
+    // (ViewContent por WhatsApp solo se distingue por el payload).
+    const actionSource =
+      typeof row.payload?.action_source === 'string'
+        ? row.payload.action_source
+        : null;
+    const inactive = deliveryInactiveReason(
+      row.event_name,
+      actionSource,
+      readDeliveryFlags(this.config),
+    );
     if (inactive) {
       this.logger.log(`drain skip ${inactive} event_id=${row.event_id}`);
       return 'held';
     }
-    if (row.event_name === 'Purchase') {
-      const activation = this.purchaseRowActivationGate(row);
+    if (row.event_name === 'VentaCerrada') {
+      const activation = this.saleRowActivationGate(row);
       if (!activation.ok) {
         try {
           await this.markSupabase(row.id, 'pending', activation.reason);
@@ -248,35 +265,6 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
       );
       return contractError ? 'needs_review' : 'held';
     }
-  }
-
-  private inactiveDeliveryReason(eventName: string): string | null {
-    if (eventName === 'Schedule' && !this.isScheduleDeliveryEnabled()) {
-      return 'schedule_delivery_inactive';
-    }
-    if (
-      eventName === 'LeadSubmitted' &&
-      !this.isWaLeadSubmittedDeliveryEnabled()
-    ) {
-      return 'wa_lead_submitted_delivery_inactive';
-    }
-    if (
-      eventName === 'QualifiedLead' &&
-      !this.isWaCrmQualificationDeliveryEnabled()
-    ) {
-      return 'wa_crm_qualification_delivery_inactive';
-    }
-    if (eventName === 'Purchase' && !this.isPurchaseDeliveryEnabled()) {
-      return 'purchase_delivery_inactive';
-    }
-    return null;
-  }
-
-  /** Eventos cuya entrega está apagada: no se piden a Supabase. */
-  private inactiveEventNames(): string[] {
-    return ['Schedule', 'LeadSubmitted', 'QualifiedLead', 'Purchase'].filter(
-      (name) => this.inactiveDeliveryReason(name) !== null,
-    );
   }
 
   private isDrainHeld(id: string, now: number): boolean {
@@ -396,25 +384,8 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  private isWaLeadSubmittedDeliveryEnabled() {
-    return parseBoolFlag(
-      this.config.get<string>('META_WA_LEAD_SUBMITTED_DELIVERY_ENABLED'),
-    );
-  }
-
-  private isWaCrmQualificationDeliveryEnabled() {
-    return parseBoolFlag(
-      this.config.get<string>('META_WA_CRM_QUALIFICATION_DELIVERY_ENABLED'),
-    );
-  }
-
-  private isPurchaseDeliveryEnabled() {
-    return parseBoolFlag(
-      this.config.get<string>('META_PURCHASE_DELIVERY_ENABLED'),
-    );
-  }
-
-  private purchaseRowActivationGate(row: SupabaseOutboxRow) {
+  /** Corte de VentaCerrada (venta real): registered_at Y sale_at ≥ META_SALE_ACTIVATED_AT. */
+  private saleRowActivationGate(row: SupabaseOutboxRow) {
     const payload = row.payload || {};
     const details =
       payload.details && typeof payload.details === 'object'
@@ -432,7 +403,7 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
       registeredAt,
       saleAt,
       eventTime: row.event_time,
-      activatedAt: this.config.get<string>('META_PURCHASE_ACTIVATED_AT'),
+      activatedAt: this.meta.saleActivatedAt,
     });
   }
 
@@ -446,7 +417,9 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
   ): Promise<'ok' | 'cancelled' | 'skipped'> {
     const fromPayload =
       typeof payload.sale_id === 'string' ? payload.sale_id.trim() : '';
-    const fromKey = /^purchase:(.+)$/i.exec(row.idempotency_key || '');
+    const fromKey = /^(?:venta_cerrada|purchase):(.+)$/i.exec(
+      row.idempotency_key || '',
+    );
     const saleId = fromPayload || (fromKey?.[1] || '').trim();
     if (!saleId) return 'cancelled';
     try {
@@ -864,7 +837,7 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
     const eligible: SupabaseOutboxRow[] = [];
     const pageSize = Math.min(100, Math.max(limit, 20));
     const maxScan = Math.max(limit * 10, 200);
-    const inactive = this.inactiveEventNames();
+    const inactive = inactiveEventNames(readDeliveryFlags(this.config));
     const now = Date.now();
     let scanned = 0;
     let cursor: { createdAt: string; id: string } | null = null;
@@ -1071,8 +1044,8 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    // Purchase: anulación CRM antes de copiar a Nest (además del gate en worker).
-    if (row.event_name === 'Purchase') {
+    // VentaCerrada: anulación CRM antes de copiar a Nest (además del gate en worker).
+    if (row.event_name === 'VentaCerrada') {
       const purchaseGate = await this.purchaseAnnulmentForDrain(row, payload);
       if (purchaseGate === 'cancelled') {
         await this.markSupabase(row.id, 'cancelled', 'contract_anulado');

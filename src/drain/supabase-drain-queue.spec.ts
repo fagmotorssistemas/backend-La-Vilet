@@ -125,7 +125,10 @@ function makeService(
       ...db,
     } as unknown as DatabaseService,
     { enqueue } as unknown as EventsService,
-    { mode: 'live' } as MetaCapiService,
+    {
+      mode: 'live',
+      saleActivatedAt: env.META_SALE_ACTIVATED_AT ?? null,
+    } as MetaCapiService,
   );
   (service as unknown as { enabled: boolean }).enabled = true;
   return service;
@@ -148,17 +151,17 @@ describe('SupabaseDrainService — cola sin bloqueo', () => {
   });
 
   it('filas retenidas al frente no impiden drenar un Lead posterior', async () => {
-    // 25 Purchase sin fechas de corte (se retienen) y luego un Lead normal.
+    // 25 VentaCerrada sin fechas de corte (se retienen) y luego un Lead normal.
     const store: Row[] = [];
-    for (let i = 1; i <= 25; i += 1) store.push(row(i, 'Purchase'));
+    for (let i = 1; i <= 25; i += 1) store.push(row(i, 'VentaCerrada'));
     store.push(row(26, 'Lead'));
     const { fetchMock } = fakeSupabase(store);
     global.fetch = fetchMock as typeof fetch;
     const enqueue = okEnqueue();
     const service = makeService(
       {
-        META_PURCHASE_DELIVERY_ENABLED: 'true',
-        META_PURCHASE_ACTIVATED_AT: '2026-01-01T00:00:00.000Z',
+        META_SALE_DELIVERY_ENABLED: 'true',
+        META_SALE_ACTIVATED_AT: '2026-01-01T00:00:00.000Z',
       },
       enqueue,
     );
@@ -174,7 +177,7 @@ describe('SupabaseDrainService — cola sin bloqueo', () => {
     );
     expect(
       store
-        .filter((r) => r.event_name === 'Purchase')
+        .filter((r) => r.event_name === 'VentaCerrada')
         .every((r) => r.status === 'pending'),
     ).toBe(true);
   });
@@ -211,7 +214,7 @@ describe('SupabaseDrainService — cola sin bloqueo', () => {
       u.pathname.endsWith('/meta_capi_outbox'),
     )!;
     expect(outboxGet.searchParams.get('event_name')).toBe(
-      'not.in.(Schedule,LeadSubmitted,QualifiedLead,Purchase)',
+      'not.in.(Schedule,LeadSubmitted,QualifiedLead,Purchase,VentaCerrada,Search,InitiateCheckout)',
     );
     expect(enqueue).toHaveBeenCalledTimes(1);
     expect(store[0].status).toBe('pending');

@@ -1,5 +1,5 @@
 /**
- * Decisión de anulación Purchase (sin I/O).
+ * Decisión de anulación de la venta real, VentaCerrada (sin I/O).
  * Fuente CRM: unit_sales_closings + contracts.status === 'anulado'.
  */
 export type PurchaseAnnulmentDecision =
@@ -55,7 +55,8 @@ export function saleIdFromPurchaseRow(row: {
   payload_redacted?: string | null;
 }): string | null {
   const key = String(row.idempotency_key || '');
-  const m = /^purchase:(.+)$/i.exec(key);
+  // venta_cerrada:{sale_id} (contrato actual) o purchase:{sale_id} (legado).
+  const m = /^(?:venta_cerrada|purchase):(.+)$/i.exec(key);
   if (m?.[1]) return m[1].trim() || null;
   if (!row.payload_redacted) return null;
   try {

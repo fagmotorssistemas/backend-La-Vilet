@@ -3,20 +3,28 @@ import {
   ConflictException,
   Injectable,
   InternalServerErrorException,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { createHash } from 'crypto';
 import { DatabaseService } from '../database/database.service';
 import { MetaCapiService } from '../meta/meta-capi.service';
 import {
   isLikelyArtificialEmail,
   isLikelyArtificialName,
 } from '../common/utils/phone';
-import type { EnqueueEventDto } from './dto/enqueue-event.dto';
+import type {
+  EnqueueEventDto,
+  MetaEnqueueEventName,
+} from './dto/enqueue-event.dto';
 import { evaluateMetaAcceptanceEvidence } from '../meta/meta-acceptance';
 import {
   gateAddToWishlist,
   gateHomeListingContent,
-  gatePurchase,
+  gateInitiateCheckout,
+  gateQualifiedPurchase,
+  gateSale,
+  gateSearch,
   gateViewContent,
   normalizeCurrency,
   resolveHomeListingContent,
@@ -66,6 +74,8 @@ export type NestEventLookupResponse = {
 
 @Injectable()
 export class EventsService {
+  private readonly logger = new Logger(EventsService.name);
+
   constructor(
     private readonly db: DatabaseService,
     private readonly meta: MetaCapiService,
@@ -184,6 +194,17 @@ export class EventsService {
   }
 
   enqueue(dto: EnqueueEventDto) {
+    return this.enqueueEvent(dto, null);
+  }
+
+  /**
+   * Encola un evento. `cascadeFrom` solo lo usa la cascada interna: marca el
+   * linaje y evita cascadas recursivas.
+   */
+  private enqueueEvent(
+    dto: EnqueueEventDto,
+    cascadeFrom: { eventId: string; eventName: string } | null,
+  ): EnqueueResponse {
     if (!dto.ads_consent) {
       throw new BadRequestException('ads_consent requerido y debe ser true');
     }
@@ -216,8 +237,13 @@ export class EventsService {
           'business_messaging_schedule_not_supported_by_meta',
         );
       }
-      if (!['LeadSubmitted', 'QualifiedLead'].includes(dto.event_name)) {
-        throw new BadRequestException('business_messaging_lead_submitted_only');
+      if (!BUSINESS_MESSAGING_EVENTS.has(dto.event_name)) {
+        throw new BadRequestException('business_messaging_event_not_supported');
+      }
+      if (dto.messaging_channel !== 'whatsapp') {
+        throw new BadRequestException(
+          'business_messaging_requires_whatsapp_channel',
+        );
       }
       const dataset = String(dto.messaging_dataset_id || '').trim();
       const ctwa = String(dto.ctwa_clid || '').trim();
@@ -286,6 +312,7 @@ export class EventsService {
       unitId,
       contentIds: dto.content_ids,
       contentType: dto.content_type,
+      eventName: dto.event_name,
     });
     const contentIds = homeListing.contentIds;
     const contentType = homeListing.contentType;
@@ -294,46 +321,32 @@ export class EventsService {
       contentType,
       contentIds,
       unitId,
+      eventName: dto.event_name,
     });
     if (!homeListingGate.ok) {
       throw new BadRequestException(homeListingGate.reason);
     }
 
-    if (dto.event_name === 'ViewContent') {
-      const gate = gateViewContent({
-        subtype,
-        unitId,
-        contentIds,
-      });
-      if (!gate.ok) throw new BadRequestException(gate.reason);
-    }
+    const eventGate = this.gateForEvent(dto, {
+      subtype,
+      unitId,
+      saleId,
+      leadId,
+      contentIds,
+    });
+    if (!eventGate.ok) throw new BadRequestException(eventGate.reason);
 
-    if (dto.event_name === 'AddToWishlist') {
-      const gate = gateAddToWishlist({
-        actionSource: dto.action_source,
-        leadId,
-        unitId,
-      });
-      if (!gate.ok) throw new BadRequestException(gate.reason);
-    }
-
-    let purchaseCurrency: string | null = null;
-    let purchaseValue: number | null = null;
+    // Valor en custom_data: Purchase usa el valor fijo configurado (decisión de
+    // negocio: igual para todo contacto calificado); VentaCerrada, el importe real.
+    let eventValue: number | null = null;
+    let eventCurrency: string | null = null;
     if (dto.event_name === 'Purchase') {
-      purchaseCurrency = normalizeCurrency(dto.currency);
-      purchaseValue =
-        dto.value != null && Number.isFinite(Number(dto.value))
-          ? Number(dto.value)
-          : null;
-      const gate = gatePurchase({
-        actionSource: dto.action_source,
-        saleId,
-        leadId,
-        unitId,
-        value: purchaseValue,
-        currency: purchaseCurrency,
-      });
-      if (!gate.ok) throw new BadRequestException(gate.reason);
+      eventValue = this.meta.qualifiedPurchaseValue;
+      eventCurrency =
+        eventValue != null ? this.meta.qualifiedPurchaseCurrency : null;
+    } else if (dto.event_name === 'VentaCerrada') {
+      eventValue = saleValueFrom(dto);
+      eventCurrency = normalizeCurrency(dto.currency);
     }
 
     const visitorKey = dto.visitor_key || null;
@@ -384,8 +397,8 @@ export class EventsService {
       contentType,
       contentName: dto.content_name,
       contentCategory: dto.content_category,
-      value: purchaseValue,
-      currency: purchaseCurrency,
+      value: eventValue,
+      currency: eventCurrency,
       messagingChannel:
         dto.messaging_channel === 'whatsapp' ? 'whatsapp' : undefined,
       ctwaClid: dto.ctwa_clid,
@@ -430,6 +443,8 @@ export class EventsService {
         qualification_source: dto.qualification_source || null,
         initial_lead_submitted_event_id:
           dto.initial_lead_submitted_event_id || null,
+        cascade_from_event_id: cascadeFrom?.eventId ?? null,
+        cascade_from_event_name: cascadeFrom?.eventName ?? null,
       },
       graph_payload: built.payload,
       dataset_id: datasetForRow,
@@ -440,30 +455,19 @@ export class EventsService {
     });
 
     if (!result.inserted) {
-      let qualifiedLeadPayloadConflict = false;
-      if (dto.event_name === 'QualifiedLead') {
-        try {
-          const stored = JSON.parse(result.row.payload_redacted) as Record<
-            string,
-            unknown
-          >;
-          qualifiedLeadPayloadConflict =
-            stored.temperature !== dto.temperature ||
-            JSON.stringify(stored.evidence_labels || []) !==
-              JSON.stringify(dto.evidence_labels || []) ||
-            (stored.qualification_source || null) !==
-              (dto.qualification_source || null);
-        } catch {
-          qualifiedLeadPayloadConflict = true;
-        }
-      }
       const conflicts =
         result.row.event_name !== dto.event_name ||
         result.row.delivery_lane !== deliveryLane ||
         (dto.event_id != null && result.row.event_id !== dto.event_id) ||
         (dto.event_time != null && result.row.event_time !== dto.event_time) ||
         result.row.dataset_id !== datasetForRow ||
-        qualifiedLeadPayloadConflict;
+        storedPayloadConflicts(result.row.payload_redacted, dto, {
+          leadId,
+          unitId,
+          saleId,
+          eventValue,
+          eventCurrency,
+        });
       if (conflicts) {
         throw new ConflictException('idempotency_key_conflict');
       }
@@ -473,28 +477,35 @@ export class EventsService {
       built.payload,
       dto.event_name,
     );
-    const activeLane =
-      this.meta.mode === 'test'
-        ? 'test'
-        : this.meta.mode === 'live'
-          ? 'live'
-          : null;
+    const holdReason = this.deliveryHoldReason(
+      dto.event_name,
+      dto.action_source,
+    );
 
     let delivery: string;
     if (result.blocked_by_consent || result.row.status === 'cancelled') {
       delivery = 'cancelled:ads_consent_revoked';
     } else if (!sendGate.ok) {
       delivery = `held:${sendGate.reason}`;
-    } else if (
-      dto.event_name === 'QualifiedLead' &&
-      !this.meta.waCrmQualificationDeliveryEnabled
-    ) {
-      delivery = 'held:wa_crm_qualification_delivery_inactive';
-    } else if (!activeLane || activeLane !== deliveryLane) {
-      delivery = 'held:lane_mismatch';
+    } else if (holdReason) {
+      delivery = `held:${holdReason}`;
     } else {
       delivery = 'queued';
     }
+
+    const cascade =
+      cascadeFrom === null &&
+      result.inserted &&
+      !result.blocked_by_consent &&
+      result.row.status !== 'cancelled'
+        ? this.cascadeLowerEvents(dto, {
+            eventId: built.eventId,
+            eventTime: built.eventTime,
+            leadId,
+            visitorKey,
+            unitId,
+          })
+        : [];
 
     return {
       ok: true,
@@ -510,8 +521,307 @@ export class EventsService {
       delivery,
       dataset_id: datasetForRow,
       delivery_outcome: normalizeDeliveryOutcome(result.row),
+      cascade,
     };
   }
+
+  private gateForEvent(
+    dto: EnqueueEventDto,
+    ctx: {
+      subtype: string | null;
+      unitId: string | null;
+      saleId: string | null;
+      leadId: string | null;
+      contentIds: string[] | undefined;
+    },
+  ): { ok: true } | { ok: false; reason: string } {
+    switch (dto.event_name) {
+      case 'ViewContent':
+        return gateViewContent({
+          subtype: ctx.subtype,
+          unitId: ctx.unitId,
+          contentIds: ctx.contentIds,
+        });
+      case 'Search':
+        return gateSearch({
+          actionSource: dto.action_source,
+          contentIds: ctx.contentIds,
+        });
+      case 'InitiateCheckout':
+        return gateInitiateCheckout({
+          actionSource: dto.action_source,
+          unitId: ctx.unitId,
+        });
+      case 'AddToWishlist':
+        return gateAddToWishlist({
+          actionSource: dto.action_source,
+          leadId: ctx.leadId,
+          unitId: ctx.unitId,
+        });
+      case 'Purchase':
+        return gateQualifiedPurchase({
+          actionSource: dto.action_source,
+          leadId: ctx.leadId,
+        });
+      case 'VentaCerrada':
+        return gateSale({
+          actionSource: dto.action_source,
+          saleId: ctx.saleId,
+          leadId: ctx.leadId,
+          unitId: ctx.unitId,
+          value: saleValueFrom(dto),
+          currency: normalizeCurrency(dto.currency),
+        });
+      default:
+        return { ok: true };
+    }
+  }
+
+  /** Motivo por el que un evento aceptado queda retenido (interruptor apagado). */
+  private deliveryHoldReason(
+    eventName: string,
+    actionSource: string,
+  ): string | null {
+    if (
+      eventName === 'QualifiedLead' &&
+      !this.meta.waCrmQualificationDeliveryEnabled
+    ) {
+      return 'wa_crm_qualification_delivery_inactive';
+    }
+    if (eventName === 'Purchase') {
+      if (!this.meta.qualifiedPurchaseDeliveryEnabled) {
+        return 'qualified_purchase_delivery_inactive';
+      }
+      if (this.meta.qualifiedPurchaseValue == null) {
+        return 'qualified_purchase_value_not_configured';
+      }
+    }
+    if (eventName === 'VentaCerrada' && !this.meta.saleDeliveryEnabled) {
+      return 'sale_delivery_inactive';
+    }
+    if (
+      isFunnelEvent(eventName, actionSource) &&
+      !this.meta.funnelEventsDeliveryEnabled
+    ) {
+      return 'funnel_events_delivery_inactive';
+    }
+    return null;
+  }
+
+  /**
+   * Cascada: un evento alto implica los inferiores (quien es contacto calificado
+   * por una unidad también mostró interés, la vio y es lead). Encola los que
+   * falten, en el mismo canal, sin duplicar: Lead/LeadSubmitted una vez por
+   * lead; ViewContent/InitiateCheckout una vez por persona y unidad cada 24 h.
+   * Un fallo en la cascada nunca invalida el evento principal.
+   */
+  private cascadeLowerEvents(
+    dto: EnqueueEventDto,
+    primary: {
+      eventId: string;
+      eventTime: number;
+      leadId: string | null;
+      visitorKey: string | null;
+      unitId: string | null;
+    },
+  ): CascadeResult[] {
+    if (!this.meta.signalCascadeEnabled) return [];
+    const targets = cascadeTargets(
+      dto.event_name,
+      dto.action_source,
+      primary.unitId,
+    );
+    const results: CascadeResult[] = [];
+    for (const target of targets) {
+      const sinceHours =
+        target === 'Lead' || target === 'LeadSubmitted' ? null : 24;
+      if (
+        this.db.hasRecentEventForScope({
+          eventName: target,
+          leadId: primary.leadId,
+          visitorKey: primary.visitorKey,
+          unitId:
+            target === 'Lead' || target === 'LeadSubmitted'
+              ? null
+              : primary.unitId,
+          sinceHours,
+        })
+      ) {
+        results.push({ event_name: target, delivery: 'skipped:already_sent' });
+        continue;
+      }
+      const child: EnqueueEventDto = {
+        ...dto,
+        event_name: target,
+        idempotency_key: `cascade:${target}:${dto.idempotency_key}`.slice(
+          0,
+          200,
+        ),
+        event_id: deterministicUuidV4(`cascade:${primary.eventId}:${target}`),
+        event_time: primary.eventTime,
+        lv_internal_subtype:
+          target === 'ViewContent' && primary.unitId
+            ? 'detalle_unidad'
+            : undefined,
+        content_ids: primary.unitId ? [primary.unitId] : undefined,
+        content_type: primary.unitId ? 'home_listing' : undefined,
+        value: undefined,
+        currency: undefined,
+        sale_id: undefined,
+        sale_at: undefined,
+        registered_at: undefined,
+        temperature: undefined,
+        evidence_labels: undefined,
+        qualification_source: undefined,
+      };
+      try {
+        const response = this.enqueueEvent(child, {
+          eventId: primary.eventId,
+          eventName: dto.event_name,
+        });
+        results.push({
+          event_name: target,
+          event_id: response.event_id,
+          delivery: response.duplicate ? 'duplicate' : response.delivery,
+        });
+      } catch (error) {
+        const reason =
+          error instanceof Error
+            ? error.message.slice(0, 120)
+            : 'cascade_error';
+        this.logger.warn(
+          `cascade skip ${target} from=${dto.event_name} reason=${reason}`,
+        );
+        results.push({ event_name: target, delivery: `rejected:${reason}` });
+      }
+    }
+    return results;
+  }
+}
+
+type CascadeResult = {
+  event_name: string;
+  event_id?: string;
+  delivery: string;
+};
+
+type EnqueueResponse = {
+  ok: true;
+  accepted: boolean;
+  duplicate: boolean;
+  blocked_by_consent: boolean;
+  event_id: string;
+  event_name: string;
+  event_time: number;
+  outbox_status: string;
+  delivery_lane: string;
+  mode: string;
+  delivery: string;
+  dataset_id: string;
+  delivery_outcome: NestEventLookupResponse['delivery_outcome'];
+  cascade: CascadeResult[];
+};
+
+/** Eventos que Meta admite por CAPI Business Messaging (WhatsApp). */
+const BUSINESS_MESSAGING_EVENTS = new Set([
+  'LeadSubmitted',
+  'QualifiedLead',
+  'Purchase',
+  'InitiateCheckout',
+  'ViewContent',
+]);
+
+/** Eventos de embudo nuevos, retenidos hasta META_FUNNEL_EVENTS_DELIVERY_ENABLED. */
+export function isFunnelEvent(eventName: string, actionSource: string) {
+  return (
+    eventName === 'Search' ||
+    eventName === 'InitiateCheckout' ||
+    (eventName === 'ViewContent' && actionSource === 'business_messaging')
+  );
+}
+
+/** Eventos inferiores implicados por uno superior (mismo canal). */
+export function cascadeTargets(
+  eventName: string,
+  actionSource: string,
+  unitId: string | null,
+): MetaEnqueueEventName[] {
+  const lead: MetaEnqueueEventName =
+    actionSource === 'business_messaging' ? 'LeadSubmitted' : 'Lead';
+  if (eventName === 'Purchase') {
+    return unitId ? ['InitiateCheckout', 'ViewContent', lead] : [lead];
+  }
+  if (eventName === 'InitiateCheckout' && unitId) {
+    return ['ViewContent'];
+  }
+  return [];
+}
+
+function saleValueFrom(dto: EnqueueEventDto): number | null {
+  return dto.value != null && Number.isFinite(Number(dto.value))
+    ? Number(dto.value)
+    : null;
+}
+
+/** UUID con formato v4 estable a partir de una semilla (reintentos idempotentes). */
+export function deterministicUuidV4(seed: string): string {
+  const hex = createHash('sha256')
+    .update(seed)
+    .digest('hex')
+    .slice(0, 32)
+    .split('');
+  hex[12] = '4';
+  hex[16] = ((parseInt(hex[16], 16) & 0x3) | 0x8).toString(16);
+  const v = hex.join('');
+  return `${v.slice(0, 8)}-${v.slice(8, 12)}-${v.slice(12, 16)}-${v.slice(16, 20)}-${v.slice(20)}`;
+}
+
+/**
+ * Un reintento con la misma clave debe describir el mismo hecho. Compara los
+ * campos que cambian su significado (no el valor del Purchase: viene de config).
+ */
+function storedPayloadConflicts(
+  storedJson: string,
+  dto: EnqueueEventDto,
+  current: {
+    leadId: string | null;
+    unitId: string | null;
+    saleId: string | null;
+    eventValue: number | null;
+    eventCurrency: string | null;
+  },
+): boolean {
+  let stored: Record<string, unknown>;
+  try {
+    stored = JSON.parse(storedJson) as Record<string, unknown>;
+  } catch {
+    return true;
+  }
+  const same = (a: unknown, b: unknown) => (a ?? null) === (b ?? null);
+  if (dto.event_name === 'QualifiedLead') {
+    return (
+      stored.temperature !== dto.temperature ||
+      JSON.stringify(stored.evidence_labels || []) !==
+        JSON.stringify(dto.evidence_labels || []) ||
+      !same(stored.qualification_source, dto.qualification_source)
+    );
+  }
+  if (dto.event_name === 'Purchase') {
+    return (
+      !same(stored.lead_id, current.leadId) ||
+      !same(stored.unit_id, current.unitId)
+    );
+  }
+  if (dto.event_name === 'VentaCerrada') {
+    return (
+      !same(stored.sale_id, current.saleId) ||
+      !same(stored.lead_id, current.leadId) ||
+      !same(stored.unit_id, current.unitId) ||
+      !same(stored.value, current.eventValue) ||
+      !same(stored.currency, current.eventCurrency)
+    );
+  }
+  return false;
 }
 
 function normalizeDeliveryOutcome(row: {

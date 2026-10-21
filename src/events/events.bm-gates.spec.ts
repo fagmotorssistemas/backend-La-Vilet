@@ -80,7 +80,7 @@ describe('EventsService — Business Messaging gates', () => {
     }
   });
 
-  it('rechaza Lead genérico en BM: solo LeadSubmitted usa ese canal', () => {
+  it('rechaza Lead genérico en BM: por WhatsApp el lead es LeadSubmitted', () => {
     const { service, db } = makeService();
     expect(() =>
       service.enqueue({
@@ -91,7 +91,7 @@ describe('EventsService — Business Messaging gates', () => {
         ctwa_clid: 'Aff',
         whatsapp_business_account_id: 'waba',
       } as EnqueueEventDto),
-    ).toThrow(/business_messaging_lead_submitted_only/);
+    ).toThrow(/business_messaging_event_not_supported/);
     expect(db.insertOutbox).not.toHaveBeenCalled();
   });
 

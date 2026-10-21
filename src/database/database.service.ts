@@ -78,7 +78,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       excludeSchedule?: boolean;
       excludeLeadSubmitted?: boolean;
       excludeQualifiedLead?: boolean;
-      excludePurchase?: boolean;
+      excludeEventNames?: string[];
     },
   ): OutboxRow[] {
     return this.store.claimPending(limit, deliveryLane, opts);
@@ -164,6 +164,12 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
 
   countsMetaResultSync() {
     return this.store.countsMetaResultSync();
+  }
+
+  hasRecentEventForScope(
+    input: Parameters<SqliteOutboxStore['hasRecentEventForScope']>[0],
+  ): boolean {
+    return this.store.hasRecentEventForScope(input);
   }
 
   getOutboxById(id: number) {
