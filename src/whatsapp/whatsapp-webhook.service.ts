@@ -362,8 +362,25 @@ export class WhatsappWebhookService implements OnModuleInit, OnModuleDestroy {
       return { duplicate: false, linkStatus: 'seen_no_referral' };
     }
 
-    const linkStatus = await this.correlateAndMaybeSync(row.wamid);
-    return { duplicate: false, linkStatus };
+    try {
+      const linkStatus = await this.correlateAndMaybeSync(row.wamid);
+      return { duplicate: false, linkStatus };
+    } catch (error) {
+      // El recibo ya está guardado: la conciliación lo reintentará. No se
+      // propaga para no devolver 500 a Meta por un fallo del CRM.
+      this.db.updateWaCloudReceiptLink(row.wamid, {
+        linkStatus: 'pending_link',
+        lastError: 'correlate_error',
+      });
+      this.logger.warn(
+        JSON.stringify({
+          event: 'wa_cloud_correlate_error',
+          message:
+            error instanceof Error ? error.message.slice(0, 120) : 'unknown',
+        }),
+      );
+      return { duplicate: false, linkStatus: 'pending_link' };
+    }
   }
 
   async correlateAndMaybeSync(wamid: string): Promise<string> {
@@ -419,14 +436,16 @@ export class WhatsappWebhookService implements OnModuleInit, OnModuleDestroy {
       return 'pending_link';
     }
 
+    // Se guarda la correlación pero NO se marca linked hasta que el CRM confirme:
+    // si el sync falla o el proceso cae aquí, la fila sigue siendo conciliable.
     this.db.updateWaCloudReceiptLink(wamid, {
-      linkStatus: 'linked',
+      linkStatus: 'pending_link',
       leadId: lead.id,
       contactId: lead.contact_id,
       kommoId: lead.kommo_id,
       tenantId: lead.tenant_id,
       projectId: lead.project_id,
-      lastError: null,
+      lastError: 'preserve_pending',
     });
 
     const synced = await this.syncPreserveCtwa({
@@ -456,8 +475,14 @@ export class WhatsappWebhookService implements OnModuleInit, OnModuleDestroy {
     const pending = this.db.listPendingWaCloudReceipts(limit);
     let linked = 0;
     for (const row of pending) {
-      const status = await this.correlateAndMaybeSync(row.wamid);
+      let status: string;
+      try {
+        status = await this.correlateAndMaybeSync(row.wamid);
+      } catch {
+        status = 'pending_link';
+      }
       if (status === 'linked') linked += 1;
+      else this.db.scheduleWaReceiptReconcileRetry(row.wamid);
     }
     return { tried: pending.length, linked };
   }
@@ -491,12 +516,22 @@ export class WhatsappWebhookService implements OnModuleInit, OnModuleDestroy {
         or: `(whatsapp_id.eq.${quoted},phone_normalized.eq.${quoted})`,
         limit: '5',
       });
-      const res = await fetch(`${url}/rest/v1/leads?${qs}`, {
-        headers: {
-          apikey: key,
-          Authorization: `Bearer ${key}`,
-        },
-      });
+      let res: Response;
+      try {
+        res = await fetch(`${url}/rest/v1/leads?${qs}`, {
+          headers: {
+            apikey: key,
+            Authorization: `Bearer ${key}`,
+          },
+          signal: AbortSignal.timeout(this.supabaseTimeoutMs()),
+        });
+      } catch {
+        lookupsFailed += 1;
+        this.logger.warn(
+          JSON.stringify({ event: 'wa_cloud_lead_lookup_failed', http: 0 }),
+        );
+        continue;
+      }
       if (!res.ok) {
         lookupsFailed += 1;
         this.logger.warn(
@@ -507,9 +542,15 @@ export class WhatsappWebhookService implements OnModuleInit, OnModuleDestroy {
         );
         continue;
       }
+      let rows: LeadMatch[];
+      try {
+        rows = (await res.json()) as LeadMatch[];
+      } catch {
+        lookupsFailed += 1;
+        continue;
+      }
       lookupsOk += 1;
-      const rows = (await res.json()) as LeadMatch[];
-      for (const row of rows) {
+      for (const row of Array.isArray(rows) ? rows : []) {
         if (row?.id) byId.set(row.id, row);
       }
     }
@@ -541,30 +582,41 @@ export class WhatsappWebhookService implements OnModuleInit, OnModuleDestroy {
       return { ok: false, reason: 'supabase_not_configured' };
     }
 
-    const res = await fetch(`${url}/rest/v1/rpc/lv_app_preserve_ctwa`, {
-      method: 'POST',
-      headers: {
-        apikey: key,
-        Authorization: `Bearer ${key}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        p_tenant_id: input.tenantId,
-        p_project_id: input.projectId,
-        p_contact_id: input.contactId,
-        p_kommo_id: input.kommoId,
-        p_ctwa_clid: input.ctwaClid,
-        p_field_path: input.fieldPath,
-        p_source_id: input.sourceId,
-        p_source_url: input.sourceUrl,
-        p_referral_source_type: input.referralSourceType,
-        p_external_message_id: input.externalMessageId,
-      }),
-    });
+    let res: Response;
+    try {
+      res = await fetch(`${url}/rest/v1/rpc/lv_app_preserve_ctwa`, {
+        method: 'POST',
+        headers: {
+          apikey: key,
+          Authorization: `Bearer ${key}`,
+          'Content-Type': 'application/json',
+        },
+        signal: AbortSignal.timeout(this.supabaseTimeoutMs()),
+        body: JSON.stringify({
+          p_tenant_id: input.tenantId,
+          p_project_id: input.projectId,
+          p_contact_id: input.contactId,
+          p_kommo_id: input.kommoId,
+          p_ctwa_clid: input.ctwaClid,
+          p_field_path: input.fieldPath,
+          p_source_id: input.sourceId,
+          p_source_url: input.sourceUrl,
+          p_referral_source_type: input.referralSourceType,
+          p_external_message_id: input.externalMessageId,
+        }),
+      });
+    } catch {
+      return { ok: false, reason: 'preserve_network_error' };
+    }
     if (!res.ok) {
       return { ok: false, reason: `preserve_http_${res.status}` };
     }
-    const json = (await res.json()) as { ok?: boolean; action?: string };
+    let json: { ok?: boolean; action?: string };
+    try {
+      json = (await res.json()) as { ok?: boolean; action?: string };
+    } catch {
+      return { ok: false, reason: 'preserve_invalid_response' };
+    }
     if (json?.ok !== true) {
       return { ok: false, reason: 'preserve_rejected' };
     }
@@ -575,6 +627,10 @@ export class WhatsappWebhookService implements OnModuleInit, OnModuleDestroy {
       }),
     );
     return { ok: true };
+  }
+
+  private supabaseTimeoutMs() {
+    return Number(this.config.get('SUPABASE_HTTP_TIMEOUT_MS')) || 10000;
   }
 
   healthSnapshot() {

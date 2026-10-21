@@ -272,6 +272,10 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     return this.store.listPendingWaCloudReceipts(limit);
   }
 
+  scheduleWaReceiptReconcileRetry(wamid: string, maxAttempts?: number) {
+    return this.store.scheduleWaReceiptReconcileRetry(wamid, maxAttempts);
+  }
+
   countsWaCloudReceipts() {
     return this.store.countsWaCloudReceipts();
   }

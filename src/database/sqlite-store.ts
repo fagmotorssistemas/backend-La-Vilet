@@ -65,6 +65,9 @@ export type WaCloudReceiptRow = {
   referral_object_present: number;
   ctwa_clid_key_present: number;
   message_timestamp: string | null;
+  /** Intentos de conciliación fallidos; define la espera del siguiente. */
+  reconcile_attempts: number;
+  next_reconcile_at: string | null;
   link_status: string;
   lead_id: string | null;
   contact_id: string | null;
@@ -314,6 +317,22 @@ export class SqliteOutboxStore {
         `INSERT OR IGNORE INTO schema_migrations (id) VALUES ('008_wa_cloud_ctwa_extract_diag')`,
       )
       .run();
+
+    if (!receiptCols.includes('reconcile_attempts')) {
+      this.db.exec(
+        `ALTER TABLE wa_cloud_message_receipts ADD COLUMN reconcile_attempts INTEGER NOT NULL DEFAULT 0`,
+      );
+    }
+    if (!receiptCols.includes('next_reconcile_at')) {
+      this.db.exec(
+        `ALTER TABLE wa_cloud_message_receipts ADD COLUMN next_reconcile_at TEXT`,
+      );
+    }
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO schema_migrations (id) VALUES ('011_wa_receipt_reconcile_backoff')`,
+      )
+      .run();
   }
 
   insertWaCloudReceipt(input: {
@@ -432,16 +451,69 @@ export class SqliteOutboxStore {
     return result.changes > 0;
   }
 
-  listPendingWaCloudReceipts(limit = 50): WaCloudReceiptRow[] {
+  /**
+   * Recibos CTWA por conciliar cuya espera venció. Incluye filas antiguas que
+   * quedaron `linked` sin sincronizar con el CRM. Las filas que no casan
+   * esperan cada vez más: no acaparan el lote ni se reintentan sin fin.
+   */
+  listPendingWaCloudReceipts(
+    limit = 50,
+    nowIso = new Date().toISOString(),
+  ): WaCloudReceiptRow[] {
     return this.db
       .prepare(
         `SELECT * FROM wa_cloud_message_receipts
-         WHERE link_status IN ('pending_link', 'pending_ambiguous', 'sync_failed')
-           AND has_ctwa = 1
-         ORDER BY created_at ASC
-         LIMIT ?`,
+         WHERE has_ctwa = 1
+           AND (
+             link_status IN ('pending_link', 'pending_ambiguous', 'sync_failed')
+             OR (link_status = 'linked' AND supabase_synced = 0)
+           )
+           AND (next_reconcile_at IS NULL OR next_reconcile_at <= @now)
+         ORDER BY COALESCE(next_reconcile_at, created_at) ASC
+         LIMIT @limit`,
       )
-      .all(Math.max(1, Math.min(200, limit))) as WaCloudReceiptRow[];
+      .all({
+        now: nowIso,
+        limit: Math.max(1, Math.min(200, limit)),
+      }) as WaCloudReceiptRow[];
+  }
+
+  /**
+   * Programa el siguiente intento de conciliación (1 min, 2 min… hasta 6 h).
+   * Tras `maxAttempts` deja la fila `unlinked_expired` (visible en health).
+   */
+  scheduleWaReceiptReconcileRetry(wamid: string, maxAttempts = 30): string {
+    const row = this.getWaCloudReceipt(wamid);
+    if (!row) return 'missing';
+    const attempts = Number(row.reconcile_attempts || 0) + 1;
+    if (attempts >= maxAttempts) {
+      this.db
+        .prepare(
+          `UPDATE wa_cloud_message_receipts
+           SET link_status = 'unlinked_expired',
+               reconcile_attempts = @attempts,
+               next_reconcile_at = NULL,
+               updated_at = datetime('now')
+           WHERE wamid = @wamid`,
+        )
+        .run({ wamid, attempts });
+      return 'unlinked_expired';
+    }
+    const delaySec = Math.min(6 * 3600, 60 * 2 ** Math.min(attempts - 1, 20));
+    this.db
+      .prepare(
+        `UPDATE wa_cloud_message_receipts
+         SET reconcile_attempts = @attempts,
+             next_reconcile_at = @next,
+             updated_at = datetime('now')
+         WHERE wamid = @wamid`,
+      )
+      .run({
+        wamid,
+        attempts,
+        next: new Date(Date.now() + delaySec * 1000).toISOString(),
+      });
+    return row.link_status;
   }
 
   countsWaCloudReceipts(): Record<string, number> {
