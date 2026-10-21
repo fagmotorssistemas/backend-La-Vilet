@@ -395,6 +395,12 @@ export class EventsService {
 
     const deliveryLane =
       dto.delivery_lane || (this.meta.mode === 'test' ? 'test' : 'live');
+    if (
+      (this.meta.mode === 'live' || this.meta.mode === 'test') &&
+      deliveryLane !== this.meta.mode
+    ) {
+      throw new BadRequestException('delivery_lane_mismatch');
+    }
 
     let datasetForRow: string;
     if (dto.action_source === 'business_messaging') {

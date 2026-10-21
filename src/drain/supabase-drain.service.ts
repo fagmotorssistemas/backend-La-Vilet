@@ -1,4 +1,6 @@
 import {
+  BadRequestException,
+  ConflictException,
   Injectable,
   Logger,
   OnModuleDestroy,
@@ -210,12 +212,21 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
           outcome = await this.forwardRow(row);
         } catch (error) {
           outcome = 'failed';
+          const contractError =
+            error instanceof ConflictException ||
+            error instanceof BadRequestException;
           const reason =
-            error instanceof Error
-              ? error.message.slice(0, 120)
-              : 'drain_row_error';
+            error instanceof ConflictException
+              ? 'nest_idempotency_conflict'
+              : error instanceof Error
+                ? error.message.slice(0, 120)
+                : 'drain_row_error';
           try {
-            await this.markSupabase(row.id, 'pending', reason);
+            await this.markSupabase(
+              row.id,
+              contractError ? 'needs_review' : 'pending',
+              reason,
+            );
           } catch {
             // La fila sigue pending; el siguiente tick reintentará la sincronización.
           }
@@ -1194,7 +1205,7 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
 
   private async markSupabase(
     id: string,
-    status: 'forwarded' | 'cancelled' | 'pending',
+    status: 'forwarded' | 'cancelled' | 'pending' | 'needs_review',
     lastError: string | null,
   ) {
     const ok = await this.transitionSupabaseStatus(id, null, status, lastError);
@@ -1239,7 +1250,7 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
   private async transitionSupabaseStatus(
     id: string,
     fromStatus: string | null,
-    toStatus: 'forwarded' | 'cancelled' | 'pending',
+    toStatus: 'forwarded' | 'cancelled' | 'pending' | 'needs_review',
     lastError: string | null,
   ): Promise<boolean> {
     const body: Record<string, unknown> = {

@@ -17,7 +17,9 @@ la versión desplegada ni RLS con identidades reales.
 - Reinicio real de la instancia SQLite entre fallo y recuperación de la
   sincronización de resultado. La fila Graph permanece `sent` y no vuelve a
   enviarse.
-- Modo test solo reclama test; una fila live queda `held:lane_mismatch`.
+- Con `META_MODE=test` o `live`, un evento de otro carril se rechaza con
+  `400 delivery_lane_mismatch` y no se persiste (el drain lo pasa a
+  `needs_review`). Solo `META_MODE=disabled` acepta ambos carriles y los retiene.
 - Purchase sin fechas queda pendiente con `purchase_registered_at_required` o
   `purchase_sale_at_required` antes de cualquier intento Graph.
 

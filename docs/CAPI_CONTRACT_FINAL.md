@@ -31,7 +31,7 @@ El productor debe enviar siempre:
 - `event_name`, `idempotency_key` no vacía, `event_id` UUID v4 estable, `event_time` Unix segundos del hecho original, `action_source`, `ads_consent` y `delivery_lane` (`test` o `live`).
 - El reintento conserva exactamente event_id, event_time, clave y carril.
 - Una clave reutilizada con otro evento, ID, fecha, carril o dataset devuelve `409 idempotency_key_conflict`.
-- `delivery_lane=test` y `live` comparten esquema, pero el worker solo reclama el carril de su modo. Test requiere test code; live lo prohíbe.
+- `delivery_lane=test` y `live` comparten esquema. Con `META_MODE=test` o `live`, un evento de otro carril devuelve `400 delivery_lane_mismatch` y no se persiste; solo `META_MODE=disabled` acepta ambos y los retiene. Test requiere test code; live lo prohíbe.
 - El backend aún genera event_id/event_time para clientes legacy que los omitan. Esta tolerancia no forma parte del contrato del frontend nuevo.
 
 Campos comunes opcionales según disponibilidad: phone/email/name/city/country/external_id, visitor_key/lead_id, fbp/fbc/fbclid, IP/UA y URL web. Fuera de website se eliminan URL, cookies web, IP y UA.

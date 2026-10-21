@@ -285,8 +285,11 @@ describe('contrato frontend/backend conciliado (integración aislada)', () => {
       action_source: 'website',
       ads_consent: true,
       delivery_lane: 'live',
-    }).expect(202);
-    expect(live.body.delivery).toBe('held:lane_mismatch');
+    }).expect(400);
+    expect(live.body.message).toBe('delivery_lane_mismatch');
+    expect(
+      database.getLatestByEventId('a0000000-0000-4000-8000-000000000001'),
+    ).toBe(undefined);
 
     const missingDates = await post({
       event_name: 'Purchase',
