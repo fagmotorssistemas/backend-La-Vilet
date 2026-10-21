@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import request from 'supertest';
@@ -15,15 +18,35 @@ type EnqueueBody = {
 describe('lavilet-meta-capi (e2e)', () => {
   let app: INestApplication<App>;
   const secret = 'test-internal-secret-123456';
+  const originalFetch = global.fetch;
+  let dir: string;
+
+  beforeAll(() => {
+    // Aislamiento total: ninguna llamada de red, aunque el .env local
+    // apunte a Supabase o Meta reales.
+    global.fetch = jest.fn(async (input: RequestInfo | URL) => {
+      throw new Error(`external_fetch_blocked:${String(input)}`);
+    }) as typeof fetch;
+  });
+
+  afterAll(() => {
+    global.fetch = originalFetch;
+  });
 
   beforeEach(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'lavilet-capi-e2e-'));
     process.env.META_MODE = 'disabled';
     process.env.META_DATASET_ID = '923439043758658';
     process.env.META_CAPI_ACCESS_TOKEN = '';
+    process.env.META_WA_CAPI_ACCESS_TOKEN = '';
     process.env.META_TEST_EVENT_CODE = '';
     process.env.META_CAPI_INTERNAL_SECRET = secret;
-    process.env.DATABASE_PATH = './data/test-e2e.db';
+    process.env.DATABASE_PATH = join(dir, 'test-e2e.db');
     process.env.OUTBOX_ENABLED = 'false';
+    process.env.SUPABASE_DRAIN_ENABLED = 'false';
+    process.env.SUPABASE_URL = '';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = '';
+    process.env.META_WA_CTWA_RECONCILE_ENABLED = 'false';
 
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
@@ -43,6 +66,11 @@ describe('lavilet-meta-capi (e2e)', () => {
 
   afterEach(async () => {
     await app.close();
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // Windows puede retener el WAL un instante.
+    }
   });
 
   it('health sin secretos', async () => {

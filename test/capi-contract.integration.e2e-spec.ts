@@ -19,7 +19,11 @@ type Fixture = Record<string, unknown> & {
 describe('contrato frontend/backend conciliado (integración aislada)', () => {
   const secret = 'integration-local-secret';
   const fixtures = JSON.parse(
-    readFileSync('D:/FrontLaVilet/docs/CAPI_LOCAL_TEST_PAYLOADS.json', 'utf8'),
+    readFileSync(
+      process.env.CAPI_FRONTEND_FIXTURES ||
+        'D:/FrontLaVilet/docs/CAPI_LOCAL_TEST_PAYLOADS.json',
+      'utf8',
+    ),
   ) as Fixture[];
   let app: INestApplication;
   let database: DatabaseService;
@@ -39,6 +43,9 @@ describe('contrato frontend/backend conciliado (integración aislada)', () => {
     process.env.META_CAPI_INTERNAL_SECRET = secret;
     process.env.OUTBOX_ENABLED = 'false';
     process.env.SUPABASE_DRAIN_ENABLED = 'false';
+    process.env.SUPABASE_URL = '';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = '';
+    process.env.META_WA_CTWA_RECONCILE_ENABLED = 'false';
 
     originalFetch = global.fetch;
     global.fetch = jest.fn(async (input: RequestInfo | URL) => {
