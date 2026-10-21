@@ -7,8 +7,12 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { plainToInstance } from 'class-transformer';
+import { validateSync } from 'class-validator';
 import { randomUUID } from 'crypto';
 import { DatabaseService } from '../database/database.service';
+import { holdBackoffSeconds } from '../database/sqlite-store';
+import { EnqueueEventDto } from '../events/dto/enqueue-event.dto';
 import { EventsService } from '../events/events.service';
 import { MetaCapiService } from '../meta/meta-capi.service';
 import { decideWaLeadSubmittedConsentGate } from '../meta/wa-lead-submitted-consent-gate';
@@ -34,7 +38,17 @@ type SupabaseOutboxRow = {
   lead_id: string | null;
   visitor_key: string | null;
   ads_consent_required: boolean;
+  created_at: string;
 };
+
+type DrainRowOutcome = 'forwarded' | 'cancelled' | 'needs_review' | 'held';
+
+const DRAIN_HOLDS_MAX = 5000;
+
+/** Valor entre comillas para filtros lógicos PostgREST (or/and). */
+function quotePostgrestValue(value: string): string {
+  return `"${String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
 
 /**
  * Drena meta_capi_outbox (Supabase) → cola Nest local, sin depender de tráfico web.
@@ -50,6 +64,14 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
   private lastTickAt: string | null = null;
   private lastTickError: string | null = null;
   private readonly ownerId = randomUUID();
+  /**
+   * Filas Supabase retenidas (gate, consulta transitoria). En memoria: tras un
+   * reinicio se reevalúan, nunca se pierden. Evita que bloqueen el lote.
+   */
+  private readonly drainHolds = new Map<
+    string,
+    { until: number; count: number }
+  >();
 
   constructor(
     private readonly config: ConfigService,
@@ -122,128 +144,39 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
   async tick() {
     if (this.running || !this.enabled) return;
     this.running = true;
-    const ttl = Number(this.config.get('SUPABASE_DRAIN_LOCK_TTL_MS')) || 60000;
-    const got = this.db.tryAcquireLock('supabase_drain', this.ownerId, ttl);
-    if (!got) {
-      this.running = false;
-      return;
-    }
+    let lockHeld = false;
 
     try {
+      const ttl =
+        Number(this.config.get('SUPABASE_DRAIN_LOCK_TTL_MS')) || 60000;
+      lockHeld = this.db.tryAcquireLock('supabase_drain', this.ownerId, ttl);
+      if (!lockHeld) return;
+
       await this.recoverMissingLeadOutbox();
       await this.recoverMissingScheduleOutbox();
       await this.drainConsentLedger();
       const batch = Number(this.config.get('SUPABASE_DRAIN_BATCH_SIZE')) || 20;
       const lane = this.meta.mode === 'test' ? 'test' : 'live';
       const rows = await this.fetchPending(batch, lane);
-      let forwarded = 0;
-      let cancelled = 0;
-      let failed = 0;
-      let skipped = 0;
+      const counts: Record<DrainRowOutcome, number> = {
+        forwarded: 0,
+        cancelled: 0,
+        needs_review: 0,
+        held: 0,
+      };
 
       for (const row of rows) {
-        // Defensa: solo pending. review_hold y terminales no se envían ni se mutan.
-        if (row.status !== 'pending') {
-          skipped += 1;
-          this.logger.log(
-            `drain skip non_pending status=${row.status} event_id=${row.event_id}`,
-          );
-          continue;
-        }
-        // Schedule: delivery efectiva debe estar on (mismo control que FE).
-        if (
-          row.event_name === 'Schedule' &&
-          !this.isScheduleDeliveryEnabled()
-        ) {
-          skipped += 1;
-          this.logger.log(
-            `drain skip schedule_delivery_inactive event_id=${row.event_id}`,
-          );
-          continue;
-        }
-        // LeadSubmitted BM: mismo flag de entrega WA (default off).
-        if (
-          row.event_name === 'LeadSubmitted' &&
-          !this.isWaLeadSubmittedDeliveryEnabled()
-        ) {
-          skipped += 1;
-          this.logger.log(
-            `drain skip wa_lead_submitted_delivery_inactive event_id=${row.event_id}`,
-          );
-          continue;
-        }
-        if (
-          row.event_name === 'QualifiedLead' &&
-          !this.isWaCrmQualificationDeliveryEnabled()
-        ) {
-          skipped += 1;
-          this.logger.log(
-            `drain skip wa_crm_qualification_delivery_inactive event_id=${row.event_id}`,
-          );
-          continue;
-        }
-        // Purchase: tipado; envío solo con flag + corte de activación.
-        if (
-          row.event_name === 'Purchase' &&
-          !this.isPurchaseDeliveryEnabled()
-        ) {
-          skipped += 1;
-          this.logger.log(
-            `drain skip purchase_delivery_inactive event_id=${row.event_id}`,
-          );
-          continue;
-        }
-        const purchaseActivation =
-          row.event_name === 'Purchase' && this.isPurchaseDeliveryEnabled()
-            ? this.purchaseRowActivationGate(row)
-            : { ok: true as const };
-        if (!purchaseActivation.ok) {
-          skipped += 1;
-          await this.markSupabase(row.id, 'pending', purchaseActivation.reason);
-          this.logger.log(
-            `drain skip ${purchaseActivation.reason} event_id=${row.event_id}`,
-          );
-          continue;
-        }
-        // review_hold histórico (wishlist/purchase captura previa): no drenar.
-        // Solo pending llega aquí; defensa ya cubierta arriba.
-        let outcome: 'forwarded' | 'cancelled' | 'failed' | 'skipped';
-        try {
-          outcome = await this.forwardRow(row);
-        } catch (error) {
-          outcome = 'failed';
-          const contractError =
-            error instanceof ConflictException ||
-            error instanceof BadRequestException;
-          const reason =
-            error instanceof ConflictException
-              ? 'nest_idempotency_conflict'
-              : error instanceof Error
-                ? error.message.slice(0, 120)
-                : 'drain_row_error';
-          try {
-            await this.markSupabase(
-              row.id,
-              contractError ? 'needs_review' : 'pending',
-              reason,
-            );
-          } catch {
-            // La fila sigue pending; el siguiente tick reintentará la sincronización.
-          }
-          this.logger.warn(
-            `drain row failed event_id=${row.event_id} reason=${reason}`,
-          );
-        }
-        if (outcome === 'forwarded') forwarded += 1;
-        else if (outcome === 'cancelled') cancelled += 1;
-        else failed += 1;
+        const outcome = await this.processRow(row);
+        counts[outcome] += 1;
+        if (outcome === 'held') this.holdDrainRow(row.id);
+        else this.drainHolds.delete(row.id);
       }
 
       this.lastTickAt = new Date().toISOString();
       this.lastTickError = null;
-      if (forwarded || cancelled || failed || skipped) {
+      if (rows.length) {
         this.logger.log(
-          `drain forwarded=${forwarded} cancelled=${cancelled} failed=${failed} skipped=${skipped}`,
+          `drain forwarded=${counts.forwarded} cancelled=${counts.cancelled} needs_review=${counts.needs_review} held=${counts.held}`,
         );
       }
     } catch (error) {
@@ -254,8 +187,114 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
         error instanceof Error ? error.stack : error,
       );
     } finally {
-      this.db.releaseLock('supabase_drain', this.ownerId);
+      if (lockHeld) this.db.releaseLock('supabase_drain', this.ownerId);
       this.running = false;
+    }
+  }
+
+  /** Decide una fila pending de Supabase. Nunca lanza: los errores se clasifican. */
+  private async processRow(row: SupabaseOutboxRow): Promise<DrainRowOutcome> {
+    // Defensa: solo pending. review_hold y terminales no se envían ni se mutan.
+    if (row.status !== 'pending') {
+      this.logger.log(
+        `drain skip non_pending status=${row.status} event_id=${row.event_id}`,
+      );
+      return 'held';
+    }
+    // Flujos con entrega apagada ya se excluyen en la consulta; defensa extra.
+    const inactive = this.inactiveDeliveryReason(row.event_name);
+    if (inactive) {
+      this.logger.log(`drain skip ${inactive} event_id=${row.event_id}`);
+      return 'held';
+    }
+    if (row.event_name === 'Purchase') {
+      const activation = this.purchaseRowActivationGate(row);
+      if (!activation.ok) {
+        try {
+          await this.markSupabase(row.id, 'pending', activation.reason);
+        } catch {
+          // Solo anota el motivo; la fila sigue pending y retenida.
+        }
+        this.logger.log(
+          `drain hold ${activation.reason} event_id=${row.event_id}`,
+        );
+        return 'held';
+      }
+    }
+
+    try {
+      return await this.forwardRow(row);
+    } catch (error) {
+      const contractError =
+        error instanceof ConflictException ||
+        error instanceof BadRequestException;
+      const reason =
+        error instanceof ConflictException
+          ? 'nest_idempotency_conflict'
+          : error instanceof Error
+            ? error.message.slice(0, 120)
+            : 'drain_row_error';
+      try {
+        await this.markSupabase(
+          row.id,
+          contractError ? 'needs_review' : 'pending',
+          reason,
+        );
+      } catch {
+        // La fila sigue pending; se reintenta tras la espera.
+      }
+      this.logger.warn(
+        `drain row failed event_id=${row.event_id} reason=${reason}`,
+      );
+      return contractError ? 'needs_review' : 'held';
+    }
+  }
+
+  private inactiveDeliveryReason(eventName: string): string | null {
+    if (eventName === 'Schedule' && !this.isScheduleDeliveryEnabled()) {
+      return 'schedule_delivery_inactive';
+    }
+    if (
+      eventName === 'LeadSubmitted' &&
+      !this.isWaLeadSubmittedDeliveryEnabled()
+    ) {
+      return 'wa_lead_submitted_delivery_inactive';
+    }
+    if (
+      eventName === 'QualifiedLead' &&
+      !this.isWaCrmQualificationDeliveryEnabled()
+    ) {
+      return 'wa_crm_qualification_delivery_inactive';
+    }
+    if (eventName === 'Purchase' && !this.isPurchaseDeliveryEnabled()) {
+      return 'purchase_delivery_inactive';
+    }
+    return null;
+  }
+
+  /** Eventos cuya entrega está apagada: no se piden a Supabase. */
+  private inactiveEventNames(): string[] {
+    return ['Schedule', 'LeadSubmitted', 'QualifiedLead', 'Purchase'].filter(
+      (name) => this.inactiveDeliveryReason(name) !== null,
+    );
+  }
+
+  private isDrainHeld(id: string, now: number): boolean {
+    const hold = this.drainHolds.get(id);
+    return Boolean(hold && hold.until > now);
+  }
+
+  private holdDrainRow(id: string) {
+    const count = this.drainHolds.get(id)?.count ?? 0;
+    this.drainHolds.set(id, {
+      count: count + 1,
+      until: Date.now() + holdBackoffSeconds(count) * 1000,
+    });
+    if (this.drainHolds.size > DRAIN_HOLDS_MAX) {
+      const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+      for (const [key, hold] of this.drainHolds) {
+        if (hold.until < cutoff) this.drainHolds.delete(key);
+      }
     }
   }
 
@@ -263,8 +302,11 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
     path: string,
     init?: RequestInit,
   ): Promise<Response> {
+    const timeoutMs =
+      Number(this.config.get('SUPABASE_HTTP_TIMEOUT_MS')) || 10000;
     return fetch(`${this.supabaseUrl()}${path}`, {
       ...init,
+      signal: init?.signal ?? AbortSignal.timeout(timeoutMs),
       headers: {
         apikey: this.serviceRoleKey(),
         Authorization: `Bearer ${this.serviceRoleKey()}`,
@@ -824,22 +866,57 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /**
+   * Pending del carril activo, en orden de llegada, saltando filas retenidas.
+   * Pagina por cursor (created_at, id): filas retenidas al frente no bloquean
+   * a las posteriores. Excluye en la consulta los flujos con entrega apagada.
+   */
   private async fetchPending(
     limit: number,
     lane: 'test' | 'live',
   ): Promise<SupabaseOutboxRow[]> {
-    const qs = new URLSearchParams({
-      select: '*',
-      status: 'eq.pending',
-      delivery_lane: `eq.${lane}`,
-      order: 'created_at.asc',
-      limit: String(limit),
-    });
-    const res = await this.supabaseFetch(`/rest/v1/meta_capi_outbox?${qs}`);
-    if (!res.ok) {
-      throw new Error(`fetch_pending_http_${res.status}`);
+    const eligible: SupabaseOutboxRow[] = [];
+    const pageSize = Math.min(100, Math.max(limit, 20));
+    const maxScan = Math.max(limit * 10, 200);
+    const inactive = this.inactiveEventNames();
+    const now = Date.now();
+    let scanned = 0;
+    let cursor: { createdAt: string; id: string } | null = null;
+
+    while (eligible.length < limit && scanned < maxScan) {
+      const qs = new URLSearchParams({
+        select: '*',
+        status: 'eq.pending',
+        delivery_lane: `eq.${lane}`,
+        order: 'created_at.asc,id.asc',
+        limit: String(pageSize),
+      });
+      if (inactive.length) {
+        qs.set('event_name', `not.in.(${inactive.join(',')})`);
+      }
+      if (cursor) {
+        const at = quotePostgrestValue(cursor.createdAt);
+        const id = quotePostgrestValue(cursor.id);
+        qs.set(
+          'or',
+          `(created_at.gt.${at},and(created_at.eq.${at},id.gt.${id}))`,
+        );
+      }
+      const res = await this.supabaseFetch(`/rest/v1/meta_capi_outbox?${qs}`);
+      if (!res.ok) {
+        throw new Error(`fetch_pending_http_${res.status}`);
+      }
+      const page = (await res.json()) as SupabaseOutboxRow[];
+      for (const row of page) {
+        scanned += 1;
+        if (!this.isDrainHeld(row.id, now)) eligible.push(row);
+        if (eligible.length >= limit) break;
+      }
+      const last = page[page.length - 1];
+      if (page.length < pageSize || !last?.created_at) break;
+      cursor = { createdAt: String(last.created_at), id: String(last.id) };
     }
-    return (await res.json()) as SupabaseOutboxRow[];
+    return eligible;
   }
 
   private async leadConsentFalse(leadId: string): Promise<boolean> {
@@ -961,13 +1038,7 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
     return typeof v === 'number' && v >= 1 ? v : null;
   }
 
-  private async forwardRow(
-    row: SupabaseOutboxRow,
-  ): Promise<'forwarded' | 'cancelled' | 'failed' | 'skipped'> {
-    if (row.status !== 'pending') {
-      return 'skipped';
-    }
-
+  private async forwardRow(row: SupabaseOutboxRow): Promise<DrainRowOutcome> {
     if (
       this.db.isConsentRevoked({
         visitorKey: row.visitor_key,
@@ -1010,7 +1081,7 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
         this.logger.log(
           `drain hold ${gate.reason} event_id=${row.event_id} (conservado pending)`,
         );
-        return 'skipped';
+        return 'held';
       }
     }
 
@@ -1025,7 +1096,7 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
         this.logger.log(
           `drain hold purchase_sale_lookup_transient event_id=${row.event_id}`,
         );
-        return 'skipped';
+        return 'held';
       }
     }
 
@@ -1060,15 +1131,20 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
           ? payload.messaging_dataset_id.trim()
           : '';
       if (!ctwa || !waba || !dataset) {
+        // Contrato incompleto y permanente: nunca se encola con dataset web.
         this.logger.warn(
-          `drain skip bm_identifiers_missing event_id=${row.event_id}`,
+          `drain needs_review bm_identifiers_missing event_id=${row.event_id}`,
         );
-        // No encolar con dataset web.
-        return 'failed';
+        await this.markSupabase(
+          row.id,
+          'needs_review',
+          'bm_identifiers_missing',
+        );
+        return 'needs_review';
       }
     }
 
-    const result = this.events.enqueue({
+    const dto = plainToInstance(EnqueueEventDto, {
       event_name: row.event_name,
       idempotency_key: row.idempotency_key,
       event_id: row.event_id,
@@ -1176,6 +1252,19 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
           ? payload.initial_lead_submitted_event_id
           : undefined,
     });
+    // Mismas reglas que POST /v1/events (el drain no pasa por ValidationPipe).
+    const invalid = validateSync(dto, {
+      whitelist: true,
+      forbidNonWhitelisted: true,
+    });
+    if (invalid.length) {
+      const fields = invalid
+        .map((error) => error.property)
+        .slice(0, 5)
+        .join(',');
+      throw new BadRequestException(`drain_payload_invalid:${fields}`);
+    }
+    const result = this.events.enqueue(dto);
 
     if (result.blocked_by_consent || result.outbox_status === 'cancelled') {
       await this.markSupabase(row.id, 'cancelled', 'ads_consent_revoked');
@@ -1200,7 +1289,7 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
     }
 
     await this.markSupabase(row.id, 'pending', 'drain_enqueue_failed');
-    return 'failed';
+    return 'held';
   }
 
   private async markSupabase(

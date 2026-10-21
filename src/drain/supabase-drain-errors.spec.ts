@@ -24,16 +24,20 @@ describe('drain contract errors and lane isolation', () => {
       'delivery_lane_mismatch',
       1,
     ],
-    [new Error('fetch failed'), 'pending', 'fetch failed', 2],
+    // Error transitorio: queda pending y retenido (no se reintenta en el tick siguiente).
+    [new Error('fetch failed'), 'pending', 'fetch failed', 1],
   ])(
     'handles %s without touching test rows',
     async (error, status, reason, attempts) => {
       const makeRow = (lane: string) => ({
         id: `row-${lane}`,
         idempotency_key: `lead:${lane}`,
-        event_id: `event-${lane}`,
+        event_id:
+          lane === 'live'
+            ? 'bbbbbbbb-0000-4000-8000-000000000001'
+            : 'bbbbbbbb-0000-4000-8000-000000000002',
         event_name: 'Lead',
-        event_time: 1,
+        event_time: 1_790_000_000,
         payload: { action_source: 'website' },
         status: 'pending',
         delivery_lane: lane,
