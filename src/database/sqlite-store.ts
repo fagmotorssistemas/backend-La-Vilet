@@ -24,6 +24,8 @@ export type OutboxRow = {
   ads_consent_required: number;
   meta_response_redacted: string | null;
   delivery_outcome: string;
+  /** Veces que el worker retuvo la fila sin enviarla (gate). Define la espera. */
+  hold_count: number;
   created_at: string;
   updated_at: string;
   sent_at: string | null;
@@ -73,6 +75,15 @@ export type WaCloudReceiptRow = {
   created_at: string;
   updated_at: string;
 };
+
+/**
+ * Espera antes de reevaluar una fila retenida: 30 s, 1 min, 2 min… hasta 1 h.
+ * Evita que filas retenidas de forma permanente bloqueen la cola (orden por id).
+ */
+export function holdBackoffSeconds(holdCount: number): number {
+  const n = Number.isFinite(holdCount) ? Math.max(0, Math.floor(holdCount)) : 0;
+  return Math.min(3600, 30 * 2 ** Math.min(n, 7));
+}
 
 /** Capa SQLite sin Nest — testeable y usada por DatabaseService. */
 export class SqliteOutboxStore {
@@ -181,6 +192,16 @@ export class SqliteOutboxStore {
         `ALTER TABLE outbox_events ADD COLUMN delivery_outcome TEXT NOT NULL DEFAULT 'backend_accepted'`,
       );
     }
+    if (!names.has('hold_count')) {
+      this.db.exec(
+        `ALTER TABLE outbox_events ADD COLUMN hold_count INTEGER NOT NULL DEFAULT 0`,
+      );
+    }
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO schema_migrations (id) VALUES ('010_outbox_hold_backoff')`,
+      )
+      .run();
     this.db
       .prepare(
         `INSERT OR IGNORE INTO schema_migrations (id) VALUES ('003_delivery_lane')`,
@@ -841,22 +862,40 @@ export class SqliteOutboxStore {
   }
 
   /**
-   * Devuelve processing → pending sin perder la fila (p. ej. Schedule con delivery OFF).
-   * Revierte el attempt_count del claim para no empujar a dead por el gate.
+   * Devuelve processing → pending sin perder la fila (gate de entrega,
+   * consentimiento, credencial…). Revierte el attempt_count del claim para no
+   * empujar a dead por el gate y aplaza el siguiente intento con espera
+   * creciente: una fila retenida no vuelve a ocupar el lote en cada tick.
    */
-  releaseProcessingToPending(id: number, reason: string): boolean {
-    const result = this.db
-      .prepare(
-        `UPDATE outbox_events
-         SET status = 'pending',
-             attempt_count = CASE WHEN attempt_count > 0 THEN attempt_count - 1 ELSE 0 END,
-             last_error = @reason,
-             next_attempt_at = NULL,
-             updated_at = datetime('now')
-         WHERE id = @id AND status = 'processing'`,
-      )
-      .run({ id, reason: reason.slice(0, 200) });
-    return result.changes === 1;
+  releaseProcessingToPending(
+    id: number,
+    reason: string,
+    opts?: { retryAfterSec?: number },
+  ): boolean {
+    return this.db.transaction(() => {
+      const row = this.db
+        .prepare(
+          `SELECT hold_count FROM outbox_events WHERE id = ? AND status = 'processing'`,
+        )
+        .get(id) as { hold_count: number } | undefined;
+      if (!row) return false;
+      const delaySec =
+        opts?.retryAfterSec ?? holdBackoffSeconds(Number(row.hold_count));
+      const next = new Date(Date.now() + delaySec * 1000).toISOString();
+      const result = this.db
+        .prepare(
+          `UPDATE outbox_events
+           SET status = 'pending',
+               attempt_count = CASE WHEN attempt_count > 0 THEN attempt_count - 1 ELSE 0 END,
+               hold_count = hold_count + 1,
+               last_error = @reason,
+               next_attempt_at = @next,
+               updated_at = datetime('now')
+           WHERE id = @id AND status = 'processing'`,
+        )
+        .run({ id, reason: reason.slice(0, 200), next });
+      return result.changes === 1;
+    })();
   }
 
   getOutboxById(id: number): OutboxRow | undefined {

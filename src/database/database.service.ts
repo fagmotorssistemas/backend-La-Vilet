@@ -84,8 +84,12 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     return this.store.claimPending(limit, deliveryLane, opts);
   }
 
-  releaseProcessingToPending(id: number, reason: string): boolean {
-    return this.store.releaseProcessingToPending(id, reason);
+  releaseProcessingToPending(
+    id: number,
+    reason: string,
+    opts?: { retryAfterSec?: number },
+  ): boolean {
+    return this.store.releaseProcessingToPending(id, reason, opts);
   }
 
   markSent(id: number, metaResponseRedacted: unknown): boolean {
