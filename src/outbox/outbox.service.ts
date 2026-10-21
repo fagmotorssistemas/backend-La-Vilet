@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHash } from 'crypto';
+import { parseBoolFlag } from '../common/utils/env-flags';
 import { DatabaseService } from '../database/database.service';
 import { MetaCapiService } from '../meta/meta-capi.service';
 import {
@@ -46,7 +47,7 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
   }
 
   onModuleInit() {
-    if (this.config.get<string>('OUTBOX_ENABLED') === 'false') {
+    if (!parseBoolFlag(this.config.get<string>('OUTBOX_ENABLED'), true)) {
       this.logger.log('Outbox worker deshabilitado (OUTBOX_ENABLED=false)');
       this.enabled = false;
       return;
@@ -375,41 +376,28 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
   }
 
   private isScheduleDeliveryEnabled() {
-    const raw = String(
-      this.config.get<string>('META_SCHEDULE_DELIVERY_ENABLED') || '',
-    )
-      .trim()
-      .toLowerCase();
-    return raw === 'true' || raw === '1';
+    return parseBoolFlag(
+      this.config.get<string>('META_SCHEDULE_DELIVERY_ENABLED'),
+    );
   }
 
   private isWaLeadSubmittedDeliveryEnabled() {
-    const raw = String(
-      this.config.get<string>('META_WA_LEAD_SUBMITTED_DELIVERY_ENABLED') || '',
-    )
-      .trim()
-      .toLowerCase();
-    return raw === 'true' || raw === '1';
+    return parseBoolFlag(
+      this.config.get<string>('META_WA_LEAD_SUBMITTED_DELIVERY_ENABLED'),
+    );
   }
 
   private isWaCrmQualificationDeliveryEnabled() {
-    const raw = String(
-      this.config.get<string>('META_WA_CRM_QUALIFICATION_DELIVERY_ENABLED') ||
-        '',
-    )
-      .trim()
-      .toLowerCase();
-    return raw === 'true' || raw === '1';
+    return parseBoolFlag(
+      this.config.get<string>('META_WA_CRM_QUALIFICATION_DELIVERY_ENABLED'),
+    );
   }
 
   /** Purchase tipado; envío Graph apagado por defecto hasta activación explícita. */
   private isPurchaseDeliveryEnabled() {
-    const raw = String(
-      this.config.get<string>('META_PURCHASE_DELIVERY_ENABLED') || '',
-    )
-      .trim()
-      .toLowerCase();
-    return raw === 'true' || raw === '1';
+    return parseBoolFlag(
+      this.config.get<string>('META_PURCHASE_DELIVERY_ENABLED'),
+    );
   }
 
   /**

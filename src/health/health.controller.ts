@@ -1,5 +1,6 @@
 import { Controller, Get } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { parseBoolFlag } from '../common/utils/env-flags';
 import { MetaCapiService } from '../meta/meta-capi.service';
 import { DatabaseService } from '../database/database.service';
 import { OutboxService } from '../outbox/outbox.service';
@@ -32,23 +33,26 @@ export class HealthController {
       wa_messaging_token_configured: Boolean(this.meta.waMessagingAccessToken),
       delivery_enabled: gate.ok,
       delivery_reason: gate.ok ? null : gate.reason,
+      /** Carril WhatsApp (mensajería): modo válido + token WA propio. */
+      wa_delivery_enabled:
+        this.meta.assertModeAllowed().ok &&
+        Boolean(this.meta.waMessagingAccessToken),
       core_setup_conservative: this.meta.coreSetupConservative,
-      purchase_delivery_enabled:
-        String(this.config.get<string>('META_PURCHASE_DELIVERY_ENABLED') || '')
-          .trim()
-          .toLowerCase() === 'true',
+      purchase_delivery_enabled: parseBoolFlag(
+        this.config.get<string>('META_PURCHASE_DELIVERY_ENABLED'),
+      ),
       purchase_activated_at:
         String(
           this.config.get<string>('META_PURCHASE_ACTIVATED_AT') || '',
         ).trim() || null,
       wa_crm_qualification_delivery_enabled:
-        String(
-          this.config.get<string>(
-            'META_WA_CRM_QUALIFICATION_DELIVERY_ENABLED',
-          ) || '',
-        )
-          .trim()
-          .toLowerCase() === 'true',
+        this.meta.waCrmQualificationDeliveryEnabled,
+      schedule_delivery_enabled: parseBoolFlag(
+        this.config.get<string>('META_SCHEDULE_DELIVERY_ENABLED'),
+      ),
+      wa_lead_submitted_delivery_enabled: parseBoolFlag(
+        this.config.get<string>('META_WA_LEAD_SUBMITTED_DELIVERY_ENABLED'),
+      ),
       persistence: {
         database_path: this.db.databasePath,
       },

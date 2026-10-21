@@ -1286,6 +1286,12 @@ export class SqliteOutboxStore {
     return out;
   }
 
+  /**
+   * Conteo operativo por evento/canal/dataset/carril/estado, total y últimos 7
+   * días (por event_time). Agregado en SQLite: no carga los payloads en memoria.
+   * Canal = data[0].messaging_channel, o action_source si no hay; si no es
+   * texto o el JSON es inválido → 'unknown'.
+   */
   deliveryBreakdown(): Array<{
     event_name: string;
     channel: string;
@@ -1296,68 +1302,62 @@ export class SqliteOutboxStore {
     window: 'all' | 'last_7d';
     count: number;
   }> {
+    const nowMs = Date.now();
     const rows = this.db
       .prepare(
-        `SELECT event_name, dataset_id, delivery_lane, status, delivery_outcome,
-              graph_payload, event_time
-       FROM outbox_events`,
+        `SELECT event_name, channel, dataset_id, delivery_lane, status,
+                delivery_outcome,
+                COUNT(*) AS total,
+                SUM(CASE WHEN event_time * 1000 >= @cutoff
+                          AND event_time * 1000 <= @now THEN 1 ELSE 0 END) AS recent
+         FROM (
+           SELECT event_name, dataset_id, delivery_lane, status,
+                  delivery_outcome, event_time,
+                  CASE
+                    WHEN NOT json_valid(graph_payload) THEN 'unknown'
+                    WHEN COALESCE(json_type(graph_payload, '$.data[0].messaging_channel'), 'null') <> 'null'
+                      THEN CASE
+                        WHEN json_type(graph_payload, '$.data[0].messaging_channel') = 'text'
+                          THEN json_extract(graph_payload, '$.data[0].messaging_channel')
+                        ELSE 'unknown'
+                      END
+                    WHEN json_type(graph_payload, '$.data[0].action_source') = 'text'
+                      THEN json_extract(graph_payload, '$.data[0].action_source')
+                    ELSE 'unknown'
+                  END AS channel
+           FROM outbox_events
+         )
+         GROUP BY event_name, channel, dataset_id, delivery_lane, status,
+                  delivery_outcome
+         ORDER BY event_name, channel, dataset_id, delivery_lane, status,
+                  delivery_outcome`,
       )
-      .all() as Array<Record<string, unknown>>;
-    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
-    const groups = new Map<
-      string,
-      {
-        event_name: string;
-        channel: string;
-        dataset_id: string;
-        delivery_lane: string;
-        status: string;
-        delivery_outcome: string;
-        window: 'all' | 'last_7d';
-        count: number;
-      }
-    >();
-    const add = (row: Record<string, unknown>, window: 'all' | 'last_7d') => {
-      let channel = 'unknown';
-      try {
-        const graphPayload =
-          typeof row.graph_payload === 'string' ? row.graph_payload : '{}';
-        const graph = JSON.parse(graphPayload) as {
-          data?: Array<Record<string, unknown>>;
-        };
-        const first = graph.data?.[0];
-        const rawChannel = first?.messaging_channel ?? first?.action_source;
-        channel = typeof rawChannel === 'string' ? rawChannel : 'unknown';
-      } catch {
-        /* redacted operational grouping only */
-      }
-      const item = {
+      .all({ cutoff: nowMs - 7 * 24 * 60 * 60 * 1000, now: nowMs }) as Array<{
+      event_name: string;
+      channel: string;
+      dataset_id: string;
+      delivery_lane: string;
+      status: string;
+      delivery_outcome: string;
+      total: number;
+      recent: number;
+    }>;
+    const out: ReturnType<SqliteOutboxStore['deliveryBreakdown']> = [];
+    for (const row of rows) {
+      const base = {
         event_name: String(row.event_name),
-        channel,
+        channel: String(row.channel),
         dataset_id: String(row.dataset_id),
         delivery_lane: String(row.delivery_lane),
         status: String(row.status),
         delivery_outcome: String(row.delivery_outcome),
-        window,
-        count: 0,
       };
-      const key = JSON.stringify(item);
-      const found = groups.get(key);
-      if (found) found.count += 1;
-      else groups.set(key, { ...item, count: 1 });
-    };
-    for (const row of rows) {
-      add(row, 'all');
-      const happenedAt = Number(row.event_time) * 1000;
-      if (
-        Number.isFinite(happenedAt) &&
-        happenedAt >= cutoff &&
-        happenedAt <= Date.now()
-      ) {
-        add(row, 'last_7d');
+      out.push({ ...base, window: 'all', count: Number(row.total) });
+      if (Number(row.recent) > 0) {
+        out.push({ ...base, window: 'last_7d', count: Number(row.recent) });
       }
     }
-    return [...groups.values()];
+    return out;
   }
 
   purgeOld(retentionDays: number) {

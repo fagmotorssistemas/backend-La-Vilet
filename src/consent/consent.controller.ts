@@ -17,7 +17,7 @@ import {
 import { InternalSecretGuard } from '../auth/auth.module';
 import { DatabaseService } from '../database/database.service';
 
-class ConsentScopeDto {
+export class ConsentScopeDto {
   @IsOptional()
   @IsUUID('4')
   lead_id?: string;
@@ -33,6 +33,19 @@ class ConsentScopeDto {
   consent_version!: number;
 }
 
+/** Al menos un alcance no vacío: si no, la revocación no tendría efecto. */
+function requireScope(body: ConsentScopeDto): {
+  leadId: string | null;
+  visitorKey: string | null;
+} {
+  const leadId = String(body.lead_id ?? '').trim() || null;
+  const visitorKey = String(body.visitor_key ?? '').trim() || null;
+  if (!leadId && !visitorKey) {
+    throw new BadRequestException('consent_scope_required');
+  }
+  return { leadId, visitorKey };
+}
+
 @Controller('v1/consent')
 @UseGuards(InternalSecretGuard)
 export class ConsentController {
@@ -41,44 +54,40 @@ export class ConsentController {
   @Post('revoke')
   @HttpCode(202)
   revoke(@Body() body: ConsentScopeDto) {
-    if (!body.consent_version) {
-      throw new BadRequestException('consent_version requerido');
-    }
+    const { leadId, visitorKey } = requireScope(body);
     const version = body.consent_version;
     let cancelled = 0;
-    if (body.lead_id) {
-      cancelled += this.db.revokeConsent('lead', body.lead_id, version);
+    if (leadId) {
+      cancelled += this.db.revokeConsent('lead', leadId, version);
     }
-    if (body.visitor_key) {
-      cancelled += this.db.revokeConsent('visitor', body.visitor_key, version);
+    if (visitorKey) {
+      cancelled += this.db.revokeConsent('visitor', visitorKey, version);
     }
     return {
       ok: true,
       cancelled,
       consent_version: version,
-      lead_id: body.lead_id || null,
-      visitor_key: body.visitor_key || null,
+      lead_id: leadId,
+      visitor_key: visitorKey,
     };
   }
 
   @Post('grant')
   @HttpCode(202)
   grant(@Body() body: ConsentScopeDto) {
-    if (!body.consent_version) {
-      throw new BadRequestException('consent_version requerido');
-    }
+    const { leadId, visitorKey } = requireScope(body);
     const version = body.consent_version;
     const results: { scope: string; applied: boolean }[] = [];
-    if (body.lead_id) {
+    if (leadId) {
       results.push({
         scope: 'lead',
-        applied: this.db.grantConsent('lead', body.lead_id, version),
+        applied: this.db.grantConsent('lead', leadId, version),
       });
     }
-    if (body.visitor_key) {
+    if (visitorKey) {
       results.push({
         scope: 'visitor',
-        applied: this.db.grantConsent('visitor', body.visitor_key, version),
+        applied: this.db.grantConsent('visitor', visitorKey, version),
       });
     }
     return {
@@ -86,8 +95,8 @@ export class ConsentController {
       applied: results.some((r) => r.applied),
       results,
       consent_version: version,
-      lead_id: body.lead_id || null,
-      visitor_key: body.visitor_key || null,
+      lead_id: leadId,
+      visitor_key: visitorKey,
     };
   }
 }

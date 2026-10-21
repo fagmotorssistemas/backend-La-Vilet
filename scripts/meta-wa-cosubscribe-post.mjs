@@ -90,6 +90,18 @@ async function main() {
     return
   }
 
+  // Escritura sobre el WABA productivo: solo con confirmación explícita.
+  if (!process.argv.includes('--confirm')) {
+    console.log(
+      JSON.stringify({
+        step: 'dry_run',
+        would_post: `/${WABA}/subscribed_apps`,
+        hint: 'repetir con --confirm para suscribir la app La Vilet',
+      }),
+    )
+    return
+  }
+
   const post = await graph('POST', `/${WABA}/subscribed_apps`, token)
   console.log(
     JSON.stringify({

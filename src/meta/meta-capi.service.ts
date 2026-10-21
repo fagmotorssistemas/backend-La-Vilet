@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { parseBoolFlag } from '../common/utils/env-flags';
 import {
   buildHashedUserData,
   newEventId,
@@ -129,13 +130,9 @@ export class MetaCapiService {
   }
 
   get waCrmQualificationDeliveryEnabled(): boolean {
-    const value = String(
-      this.config.get<string>('META_WA_CRM_QUALIFICATION_DELIVERY_ENABLED') ||
-        '',
-    )
-      .trim()
-      .toLowerCase();
-    return value === 'true' || value === '1';
+    return parseBoolFlag(
+      this.config.get<string>('META_WA_CRM_QUALIFICATION_DELIVERY_ENABLED'),
+    );
   }
 
   get testEventCode(): string | null {

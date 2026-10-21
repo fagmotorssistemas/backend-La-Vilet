@@ -4,7 +4,9 @@
 set -euo pipefail
 
 APP_DIR="${APP_DIR:-/opt/lavilet-meta-capi}"
-SHA_EXPECTED="${SHA_EXPECTED:-$(git rev-parse origin/main)}"
+# Proyecto compose del stack existente (contenedor lavilet-capi-lavilet-meta-capi-1).
+# Sin -p, compose usaría el nombre de la carpeta y otro volumen /data vacío.
+COMPOSE_PROJECT="${COMPOSE_PROJECT:-lavilet-capi}"
 CALLBACK="https://capi.lavilett.com/api/whatsapp/webhook"
 WABA="1410020224338488"
 PHONE_ID="1372191202637500"
@@ -13,6 +15,7 @@ APP_KOMMO="1022173854571346"
 
 cd "$APP_DIR"
 git fetch origin
+SHA_EXPECTED="${SHA_EXPECTED:-$(git rev-parse origin/main)}"
 git checkout main
 git pull --ff-only origin main
 test "$(git rev-parse HEAD)" = "$SHA_EXPECTED"
@@ -43,8 +46,8 @@ upsert META_WA_CLOUD_WEBHOOK_CHALLENGE_ENABLED true
 upsert META_WA_CLOUD_WEBHOOK_RECEIVE_ENABLED true
 upsert META_WA_LEAD_SUBMITTED_DELIVERY_ENABLED false
 
-docker compose up -d --build
-docker compose ps
+docker compose -p "$COMPOSE_PROJECT" up -d --build
+docker compose -p "$COMPOSE_PROJECT" ps
 curl -sS http://127.0.0.1:3010/api/health | python3 -c "import sys,json; j=json.load(sys.stdin); print(json.dumps({'ok':j.get('ok'),'wa_cloud_webhook':j.get('wa_cloud_webhook')},indent=2))"
 
 echo "NEXT: In Meta App ${APP_LAVILET} set webhook ${CALLBACK} + same VERIFY_TOKEN + field messages → Verify and Save"

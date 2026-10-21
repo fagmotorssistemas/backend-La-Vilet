@@ -10,6 +10,7 @@ import { ConfigService } from '@nestjs/config';
 import { plainToInstance } from 'class-transformer';
 import { validateSync } from 'class-validator';
 import { randomUUID } from 'crypto';
+import { parseBoolFlag } from '../common/utils/env-flags';
 import { DatabaseService } from '../database/database.service';
 import { holdBackoffSeconds } from '../database/sqlite-store';
 import { EnqueueEventDto } from '../events/dto/enqueue-event.dto';
@@ -108,10 +109,9 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
   }
 
   onModuleInit() {
-    const raw = String(this.config.get<string>('SUPABASE_DRAIN_ENABLED') || '')
-      .trim()
-      .toLowerCase();
-    const drainOn = raw === 'true' || raw === '1';
+    const drainOn = parseBoolFlag(
+      this.config.get<string>('SUPABASE_DRAIN_ENABLED'),
+    );
 
     if (!drainOn) {
       this.logger.log(
@@ -391,40 +391,27 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
   }
 
   private isScheduleDeliveryEnabled() {
-    const raw = String(
-      this.config.get<string>('META_SCHEDULE_DELIVERY_ENABLED') || '',
-    )
-      .trim()
-      .toLowerCase();
-    return raw === 'true' || raw === '1';
+    return parseBoolFlag(
+      this.config.get<string>('META_SCHEDULE_DELIVERY_ENABLED'),
+    );
   }
 
   private isWaLeadSubmittedDeliveryEnabled() {
-    const raw = String(
-      this.config.get<string>('META_WA_LEAD_SUBMITTED_DELIVERY_ENABLED') || '',
-    )
-      .trim()
-      .toLowerCase();
-    return raw === 'true' || raw === '1';
+    return parseBoolFlag(
+      this.config.get<string>('META_WA_LEAD_SUBMITTED_DELIVERY_ENABLED'),
+    );
   }
 
   private isWaCrmQualificationDeliveryEnabled() {
-    const raw = String(
-      this.config.get<string>('META_WA_CRM_QUALIFICATION_DELIVERY_ENABLED') ||
-        '',
-    )
-      .trim()
-      .toLowerCase();
-    return raw === 'true' || raw === '1';
+    return parseBoolFlag(
+      this.config.get<string>('META_WA_CRM_QUALIFICATION_DELIVERY_ENABLED'),
+    );
   }
 
   private isPurchaseDeliveryEnabled() {
-    const raw = String(
-      this.config.get<string>('META_PURCHASE_DELIVERY_ENABLED') || '',
-    )
-      .trim()
-      .toLowerCase();
-    return raw === 'true' || raw === '1';
+    return parseBoolFlag(
+      this.config.get<string>('META_PURCHASE_DELIVERY_ENABLED'),
+    );
   }
 
   private purchaseRowActivationGate(row: SupabaseOutboxRow) {
@@ -501,12 +488,11 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async recoverMissingScheduleOutbox() {
-    const raw = String(
-      this.config.get<string>('META_SCHEDULE_RECOVER_ENABLED') || '',
-    )
-      .trim()
-      .toLowerCase();
-    if (raw !== 'true' && raw !== '1') return;
+    if (
+      !parseBoolFlag(this.config.get<string>('META_SCHEDULE_RECOVER_ENABLED'))
+    ) {
+      return;
+    }
 
     try {
       // Firma única en PG: (p_limit, p_lookback_days DEFAULT 7). Solo p_limit

@@ -37,11 +37,25 @@ Vercel (Next.js)  --META_CAPI_INTERNAL_SECRET-->  DigitalOcean (lavilet-meta-cap
 
 ## 4. Droplet + Docker Compose
 
+Usar siempre el nombre de proyecto del stack existente (`-p lavilet-capi`).
+Sin `-p`, compose toma el nombre de la carpeta y crea **otro volumen `/data`
+vacío** (cola SQLite nueva). Antes del primer despliegue, confirmar el nombre:
+
 ```bash
-docker compose up -d --build
-docker compose ps
+docker compose ls
+```
+
+```bash
+docker compose -p lavilet-capi up -d --build
+docker compose -p lavilet-capi ps
 curl -s http://127.0.0.1:3010/api/health
 ```
+
+Antes de desplegar, revisar en el `.env` del droplet: `docker-compose.yml`
+ahora pasa al contenedor `META_CORE_SETUP_CONSERVATIVE`,
+`META_SCHEDULE_DELIVERY_ENABLED`, `META_SCHEDULE_RECOVER_ENABLED`,
+`META_SCHEDULE_RECOVER_LOOKBACK_DAYS` y `SUPABASE_HTTP_TIMEOUT_MS`. Antes se
+ignoraban; un valor presente en `.env` empieza a aplicarse.
 
 El volumen `lavilet_capi_data` monta `/data`.
 

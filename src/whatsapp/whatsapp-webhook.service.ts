@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHash, timingSafeEqual } from 'crypto';
+import { parseBoolFlag } from '../common/utils/env-flags';
 import { DatabaseService } from '../database/database.service';
 import { resolveWaCloudWebhookFlags } from './whatsapp-flags';
 import {
@@ -62,12 +63,13 @@ export class WhatsappWebhookService implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   onModuleInit() {
-    const raw = String(
-      this.config.get<string>('META_WA_CTWA_RECONCILE_ENABLED') ?? 'true',
-    )
-      .trim()
-      .toLowerCase();
-    if (raw === 'false' || raw === '0' || raw === 'no') {
+    // Encendido por defecto; false|0|no|off lo apagan.
+    if (
+      !parseBoolFlag(
+        this.config.get<string>('META_WA_CTWA_RECONCILE_ENABLED'),
+        true,
+      )
+    ) {
       this.reconcileEnabled = false;
       this.logger.log('CTWA reconcile worker deshabilitado');
       return;

@@ -9,6 +9,8 @@ async function bootstrap() {
     rawBody: true,
   });
   const config = app.get(ConfigService);
+  // SIGTERM (docker stop / redeploy): cierra timers y hace checkpoint del WAL.
+  app.enableShutdownHooks();
 
   const origins = String(config.get<string>('CORS_ORIGINS') || '')
     .split(',')
