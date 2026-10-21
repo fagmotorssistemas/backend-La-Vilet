@@ -71,6 +71,72 @@ describe('meta result sync outbox', () => {
     expect(store.claimPending(10, 'live')).toHaveLength(0);
   });
 
+  it('un reintento vencido hoy se vuelve a reclamar (fechas ISO coherentes)', () => {
+    const row = insertEvent();
+    store.claimPending(1, 'live');
+    store.markSentAndQueueResult(
+      row.id,
+      { http_status: 200, events_received: 1 },
+      { p_stage: 'meta_accepted' },
+    );
+    const sync = store.claimMetaResultSync(1)[0];
+    store.markMetaResultSyncRetry(
+      sync.id,
+      'result_sync_http_503',
+      new Date(Date.now() - 1000).toISOString(),
+    );
+    expect(store.claimMetaResultSync(1).map((r) => r.id)).toEqual([sync.id]);
+  });
+
+  it('un reintento futuro no se reclama antes de tiempo', () => {
+    const row = insertEvent();
+    store.claimPending(1, 'live');
+    store.markSentAndQueueResult(
+      row.id,
+      { http_status: 200, events_received: 1 },
+      { p_stage: 'meta_accepted' },
+    );
+    const sync = store.claimMetaResultSync(1)[0];
+    store.markMetaResultSyncRetry(
+      sync.id,
+      'result_sync_http_503',
+      new Date(Date.now() + 60_000).toISOString(),
+    );
+    expect(store.claimMetaResultSync(1)).toHaveLength(0);
+  });
+
+  it('filas con formato antiguo de fecha siguen siendo reclamables', () => {
+    const row = insertEvent();
+    store.claimPending(1, 'live');
+    store.markSentAndQueueResult(
+      row.id,
+      { http_status: 200, events_received: 1 },
+      { p_stage: 'meta_accepted' },
+    );
+    raw
+      .prepare(
+        `UPDATE meta_result_sync_outbox SET next_attempt_at = datetime('now')`,
+      )
+      .run();
+    expect(store.claimMetaResultSync(1)).toHaveLength(1);
+  });
+
+  it('una fila dead no se vuelve a reclamar', () => {
+    const row = insertEvent();
+    store.claimPending(1, 'live');
+    store.markSentAndQueueResult(
+      row.id,
+      { http_status: 200, events_received: 1 },
+      { p_stage: 'meta_accepted' },
+    );
+    const sync = store.claimMetaResultSync(1)[0];
+    expect(store.markMetaResultSyncDead(sync.id, 'result_sync_http_400')).toBe(
+      true,
+    );
+    expect(store.claimMetaResultSync(10)).toHaveLength(0);
+    expect(store.countsMetaResultSync()).toEqual({ dead: 1 });
+  });
+
   it('usa una identidad estable por evento y etapa', () => {
     const one = deterministicResultSyncId('event-1', 'meta_accepted');
     expect(deterministicResultSyncId('event-1', 'meta_accepted')).toBe(one);

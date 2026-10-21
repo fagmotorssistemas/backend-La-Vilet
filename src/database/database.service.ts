@@ -158,6 +158,10 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     return this.store.markMetaResultSyncRetry(id, error, nextAttemptAt);
   }
 
+  markMetaResultSyncDead(id: number, error: string) {
+    return this.store.markMetaResultSyncDead(id, error);
+  }
+
   countsMetaResultSync() {
     return this.store.countsMetaResultSync();
   }

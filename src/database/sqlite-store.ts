@@ -37,7 +37,8 @@ export type MetaResultSyncRow = {
   event_id: string;
   stage: string;
   payload_json: string;
-  status: 'pending' | 'sent';
+  /** dead: rechazo permanente de Supabase o intentos agotados (no se reintenta). */
+  status: 'pending' | 'sent' | 'dead';
   attempt_count: number;
   next_attempt_at: string;
   last_error: string | null;
@@ -1011,30 +1012,42 @@ export class SqliteOutboxStore {
   ): void {
     const event = this.getOutboxById(outboxEventId);
     if (!event) throw new Error('result_sync_event_missing');
+    // next_attempt_at siempre en ISO: se compara como texto con un ISO.
+    const nowIso = new Date().toISOString();
     this.db
       .prepare(
         `INSERT INTO meta_result_sync_outbox (
            outbox_event_id, event_id, stage, payload_json, status, next_attempt_at
-         ) VALUES (?, ?, ?, ?, 'pending', datetime('now'))
+         ) VALUES (?, ?, ?, ?, 'pending', ?)
          ON CONFLICT(outbox_event_id, stage) DO UPDATE SET
            payload_json = excluded.payload_json,
            status = 'pending',
-           next_attempt_at = datetime('now'),
+           next_attempt_at = excluded.next_attempt_at,
            last_error = NULL,
            updated_at = datetime('now')`,
       )
-      .run(outboxEventId, event.event_id, stage, JSON.stringify(payload));
+      .run(
+        outboxEventId,
+        event.event_id,
+        stage,
+        JSON.stringify(payload),
+        nowIso,
+      );
   }
 
   claimMetaResultSync(limit = 20): MetaResultSyncRow[] {
+    // Comparación en ISO (mismo formato que markMetaResultSyncRetry). Filas
+    // antiguas con datetime('now') ('YYYY-MM-DD HH:MM:SS') siguen siendo
+    // reclamables: ' ' ordena antes que 'T'.
+    const nowIso = new Date().toISOString();
     return this.db.transaction(() => {
       const rows = this.db
         .prepare(
           `SELECT * FROM meta_result_sync_outbox
-           WHERE status = 'pending' AND next_attempt_at <= datetime('now')
+           WHERE status = 'pending' AND next_attempt_at <= ?
            ORDER BY id ASC LIMIT ?`,
         )
-        .all(Math.max(1, Math.min(100, limit))) as MetaResultSyncRow[];
+        .all(nowIso, Math.max(1, Math.min(100, limit))) as MetaResultSyncRow[];
       for (const row of rows) {
         this.db
           .prepare(
@@ -1074,6 +1087,19 @@ export class SqliteOutboxStore {
            WHERE id=? AND status='pending'`,
         )
         .run(error.slice(0, 300), nextAttemptAt, id).changes === 1
+    );
+  }
+
+  /** Rechazo permanente: deja de reintentar y conserva el motivo. */
+  markMetaResultSyncDead(id: number, error: string): boolean {
+    return (
+      this.db
+        .prepare(
+          `UPDATE meta_result_sync_outbox
+           SET status='dead', last_error=?, updated_at=datetime('now')
+           WHERE id=? AND status='pending'`,
+        )
+        .run(error.slice(0, 300), id).changes === 1
     );
   }
 

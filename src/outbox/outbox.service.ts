@@ -713,21 +713,47 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
           },
         );
         if (!response.ok) {
-          throw new Error(`result_sync_http_${response.status}`);
+          throw new ResultSyncHttpError(response.status);
         }
         this.db.markMetaResultSynced(row.id);
       } catch (error) {
+        const message =
+          error instanceof Error ? error.message : 'result_sync_failed';
+        // 400/409/422: Supabase rechaza el contenido (p. ej. CHECK de etapa);
+        // reintentar no cambia el resultado. También se corta al agotar intentos.
+        const permanent =
+          (error instanceof ResultSyncHttpError &&
+            RESULT_SYNC_PERMANENT_HTTP.has(error.status)) ||
+          row.attempt_count >= RESULT_SYNC_MAX_ATTEMPTS;
+        if (permanent && typeof this.db.markMetaResultSyncDead === 'function') {
+          this.db.markMetaResultSyncDead(row.id, message);
+          this.logger.warn(
+            `result sync dead id=${row.id} stage=${row.stage} reason=${message}`,
+          );
+          continue;
+        }
         const backoffSec = Math.min(
           3600,
           Math.pow(2, Math.min(row.attempt_count, 8)) * 5,
         );
         this.db.markMetaResultSyncRetry(
           row.id,
-          error instanceof Error ? error.message : 'result_sync_failed',
+          message,
           new Date(Date.now() + backoffSec * 1000).toISOString(),
         );
       }
     }
+  }
+}
+
+/** Respuestas de Supabase que no cambian al reintentar. */
+const RESULT_SYNC_PERMANENT_HTTP = new Set([400, 409, 422]);
+/** ~1 semana de reintentos con espera máxima de 1 h. */
+const RESULT_SYNC_MAX_ATTEMPTS = 200;
+
+class ResultSyncHttpError extends Error {
+  constructor(readonly status: number) {
+    super(`result_sync_http_${status}`);
   }
 }
 
