@@ -78,62 +78,66 @@ describe('SupabaseDrainService — review_hold vs pending', () => {
       [];
     const outboxGetUrls: string[] = [];
 
-    global.fetch = jest.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      const method = (init?.method || 'GET').toUpperCase();
+    global.fetch = jest.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method || 'GET').toUpperCase();
 
-      if (url.includes('/rest/v1/rpc/lv_recover_missing_meta_lead_outbox')) {
-        return jsonResponse({ recovered: 0 });
-      }
-
-      if (url.includes('/rest/v1/meta_ads_consent_ledger')) {
-        return jsonResponse([]);
-      }
-
-      if (url.includes('/rest/v1/meta_capi_outbox') && method === 'GET') {
-        outboxGetUrls.push(url);
-        const u = new URL(url);
-        const statusFilter = u.searchParams.get('status');
-        const laneFilter = u.searchParams.get('delivery_lane');
-        expect(statusFilter).toBe('eq.pending');
-        expect(laneFilter).toBe('eq.live');
-
-        const rows = store.filter((r) => {
-          if (statusFilter === 'eq.pending' && r.status !== 'pending') return false;
-          if (laneFilter === 'eq.live' && r.delivery_lane !== 'live') return false;
-          return true;
-        });
-        return jsonResponse(rows);
-      }
-
-      if (url.includes('/rest/v1/meta_capi_outbox') && method === 'PATCH') {
-        const idMatch = url.match(/id=eq\.([^&]+)/);
-        const id = idMatch ? decodeURIComponent(idMatch[1]) : '';
-        const body = JSON.parse(String(init?.body || '{}')) as Record<
-          string,
-          unknown
-        >;
-        patchBodies.push({ id, body });
-        const row = store.find((r) => r.id === id);
-        if (row && typeof body.status === 'string') {
-          row.status = body.status;
-          row.last_error =
-            body.last_error === undefined
-              ? row.last_error
-              : (body.last_error as string | null);
-          if (body.forwarded_at) {
-            row.forwarded_at = String(body.forwarded_at);
-          }
+        if (url.includes('/rest/v1/rpc/lv_recover_missing_meta_lead_outbox')) {
+          return jsonResponse({ recovered: 0 });
         }
-        return jsonResponse([{ id }]);
-      }
 
-      if (url.includes('/rest/v1/leads')) {
-        return jsonResponse([{ meta_ads_consent: true }]);
-      }
+        if (url.includes('/rest/v1/meta_ads_consent_ledger')) {
+          return jsonResponse([]);
+        }
 
-      return jsonResponse({}, 404);
-    }) as typeof fetch;
+        if (url.includes('/rest/v1/meta_capi_outbox') && method === 'GET') {
+          outboxGetUrls.push(url);
+          const u = new URL(url);
+          const statusFilter = u.searchParams.get('status');
+          const laneFilter = u.searchParams.get('delivery_lane');
+          expect(statusFilter).toBe('eq.pending');
+          expect(laneFilter).toBe('eq.live');
+
+          const rows = store.filter((r) => {
+            if (statusFilter === 'eq.pending' && r.status !== 'pending')
+              return false;
+            if (laneFilter === 'eq.live' && r.delivery_lane !== 'live')
+              return false;
+            return true;
+          });
+          return jsonResponse(rows);
+        }
+
+        if (url.includes('/rest/v1/meta_capi_outbox') && method === 'PATCH') {
+          const idMatch = url.match(/id=eq\.([^&]+)/);
+          const id = idMatch ? decodeURIComponent(idMatch[1]) : '';
+          const body = JSON.parse(String(init?.body || '{}')) as Record<
+            string,
+            unknown
+          >;
+          patchBodies.push({ id, body });
+          const row = store.find((r) => r.id === id);
+          if (row && typeof body.status === 'string') {
+            row.status = body.status;
+            row.last_error =
+              body.last_error === undefined
+                ? row.last_error
+                : (body.last_error as string | null);
+            if (body.forwarded_at) {
+              row.forwarded_at = String(body.forwarded_at);
+            }
+          }
+          return jsonResponse([{ id }]);
+        }
+
+        if (url.includes('/rest/v1/leads')) {
+          return jsonResponse([{ meta_ads_consent: true }]);
+        }
+
+        return jsonResponse({}, 404);
+      },
+    ) as typeof fetch;
 
     const config = {
       get: (key: string) => {
@@ -190,9 +194,7 @@ describe('SupabaseDrainService — review_hold vs pending', () => {
         event_id: '22222222-2222-4222-8222-222222222222',
       },
     ]);
-    expect(
-      enqueueCalls.some((c) => c.event_name === 'Schedule'),
-    ).toBe(false);
+    expect(enqueueCalls.some((c) => c.event_name === 'Schedule')).toBe(false);
 
     expect(schedule.status).toBe('review_hold');
     expect(schedule.forwarded_at).toBeUndefined();
@@ -233,28 +235,30 @@ describe('SupabaseDrainService — review_hold vs pending', () => {
     const enqueueNames: string[] = [];
     const patchedIds: string[] = [];
 
-    global.fetch = jest.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      const method = (init?.method || 'GET').toUpperCase();
-      if (url.includes('/rpc/')) return jsonResponse({});
-      if (url.includes('meta_ads_consent_ledger')) return jsonResponse([]);
-      if (url.includes('meta_capi_outbox') && method === 'GET') {
-        // Simula fuga: PostgREST devolviera también review_hold.
-        return jsonResponse([hold, pending]);
-      }
-      if (url.includes('meta_capi_outbox') && method === 'PATCH') {
-        const idMatch = url.match(/id=eq\.([^&]+)/);
-        const id = idMatch ? decodeURIComponent(idMatch[1]) : '';
-        patchedIds.push(id);
-        const body = JSON.parse(String(init?.body || '{}')) as {
-          status?: string;
-        };
-        if (id === pending.id && body.status) pending.status = body.status;
-        if (id === hold.id && body.status) hold.status = body.status;
-        return jsonResponse([{ id }]);
-      }
-      return jsonResponse({}, 404);
-    }) as typeof fetch;
+    global.fetch = jest.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method || 'GET').toUpperCase();
+        if (url.includes('/rpc/')) return jsonResponse({});
+        if (url.includes('meta_ads_consent_ledger')) return jsonResponse([]);
+        if (url.includes('meta_capi_outbox') && method === 'GET') {
+          // Simula fuga: PostgREST devolviera también review_hold.
+          return jsonResponse([hold, pending]);
+        }
+        if (url.includes('meta_capi_outbox') && method === 'PATCH') {
+          const idMatch = url.match(/id=eq\.([^&]+)/);
+          const id = idMatch ? decodeURIComponent(idMatch[1]) : '';
+          patchedIds.push(id);
+          const body = JSON.parse(String(init?.body || '{}')) as {
+            status?: string;
+          };
+          if (id === pending.id && body.status) pending.status = body.status;
+          if (id === hold.id && body.status) hold.status = body.status;
+          return jsonResponse([{ id }]);
+        }
+        return jsonResponse({}, 404);
+      },
+    ) as typeof fetch;
 
     const service = new SupabaseDrainService(
       {
@@ -274,7 +278,11 @@ describe('SupabaseDrainService — review_hold vs pending', () => {
       {
         enqueue: (dto: { event_name: string }) => {
           enqueueNames.push(dto.event_name);
-          return { ok: true, blocked_by_consent: false, outbox_status: 'pending' };
+          return {
+            ok: true,
+            blocked_by_consent: false,
+            outbox_status: 'pending',
+          };
         },
       } as unknown as EventsService,
       { mode: 'live' } as unknown as MetaCapiService,
@@ -318,26 +326,31 @@ describe('SupabaseDrainService — review_hold vs pending', () => {
     };
     const enqueueNames: string[] = [];
 
-    global.fetch = jest.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      const method = (init?.method || 'GET').toUpperCase();
-      if (url.includes('/rpc/')) return jsonResponse({});
-      if (url.includes('meta_ads_consent_ledger')) return jsonResponse([]);
-      if (url.includes('meta_capi_outbox') && method === 'GET') {
-        return jsonResponse([schedulePending, leadPending]);
-      }
-      if (url.includes('meta_capi_outbox') && method === 'PATCH') {
-        const idMatch = url.match(/id=eq\.([^&]+)/);
-        const id = idMatch ? decodeURIComponent(idMatch[1]) : '';
-        const body = JSON.parse(String(init?.body || '{}')) as { status?: string };
-        if (id === leadPending.id && body.status) leadPending.status = body.status;
-        if (id === schedulePending.id && body.status) {
-          schedulePending.status = body.status;
+    global.fetch = jest.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method || 'GET').toUpperCase();
+        if (url.includes('/rpc/')) return jsonResponse({});
+        if (url.includes('meta_ads_consent_ledger')) return jsonResponse([]);
+        if (url.includes('meta_capi_outbox') && method === 'GET') {
+          return jsonResponse([schedulePending, leadPending]);
         }
-        return jsonResponse([{ id }]);
-      }
-      return jsonResponse({}, 404);
-    }) as typeof fetch;
+        if (url.includes('meta_capi_outbox') && method === 'PATCH') {
+          const idMatch = url.match(/id=eq\.([^&]+)/);
+          const id = idMatch ? decodeURIComponent(idMatch[1]) : '';
+          const body = JSON.parse(String(init?.body || '{}')) as {
+            status?: string;
+          };
+          if (id === leadPending.id && body.status)
+            leadPending.status = body.status;
+          if (id === schedulePending.id && body.status) {
+            schedulePending.status = body.status;
+          }
+          return jsonResponse([{ id }]);
+        }
+        return jsonResponse({}, 404);
+      },
+    ) as typeof fetch;
 
     const service = new SupabaseDrainService(
       {
@@ -359,7 +372,11 @@ describe('SupabaseDrainService — review_hold vs pending', () => {
       {
         enqueue: (dto: { event_name: string }) => {
           enqueueNames.push(dto.event_name);
-          return { ok: true, blocked_by_consent: false, outbox_status: 'pending' };
+          return {
+            ok: true,
+            blocked_by_consent: false,
+            outbox_status: 'pending',
+          };
         },
       } as unknown as EventsService,
       { mode: 'live' } as unknown as MetaCapiService,
@@ -375,20 +392,22 @@ describe('SupabaseDrainService — review_hold vs pending', () => {
   it('recover Schedule envía solo p_limit (sin sobrecarga / sin lookback en body)', async () => {
     const rpcBodies: unknown[] = [];
 
-    global.fetch = jest.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      const method = (init?.method || 'GET').toUpperCase();
-      if (url.includes('/rpc/lv_recover_missing_meta_schedule_outbox')) {
-        rpcBodies.push(JSON.parse(String(init?.body || '{}')));
-        return jsonResponse(0);
-      }
-      if (url.includes('/rpc/')) return jsonResponse({});
-      if (url.includes('meta_ads_consent_ledger')) return jsonResponse([]);
-      if (url.includes('meta_capi_outbox') && method === 'GET') {
-        return jsonResponse([]);
-      }
-      return jsonResponse({}, 404);
-    }) as typeof fetch;
+    global.fetch = jest.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method || 'GET').toUpperCase();
+        if (url.includes('/rpc/lv_recover_missing_meta_schedule_outbox')) {
+          rpcBodies.push(JSON.parse(String(init?.body || '{}')));
+          return jsonResponse(0);
+        }
+        if (url.includes('/rpc/')) return jsonResponse({});
+        if (url.includes('meta_ads_consent_ledger')) return jsonResponse([]);
+        if (url.includes('meta_capi_outbox') && method === 'GET') {
+          return jsonResponse([]);
+        }
+        return jsonResponse({}, 404);
+      },
+    ) as typeof fetch;
 
     const service = new SupabaseDrainService(
       {

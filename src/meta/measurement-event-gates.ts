@@ -10,7 +10,8 @@ export type LvInternalSubtype =
   | 'solicitud'
   | 'cita'
   | 'compra'
-  | string;
+  // Admite subtipos futuros sin perder el autocompletado de los conocidos.
+  | (string & Record<never, never>);
 
 export type MeasurementGateResult =
   { ok: true } | { ok: false; reason: string };
@@ -148,7 +149,9 @@ export function resolveHomeListingContent(input: {
     ? [...input.contentIds]
     : undefined;
   const producerType =
-    input.contentType === 'home_listing' ? ('home_listing' as const) : undefined;
+    input.contentType === 'home_listing'
+      ? ('home_listing' as const)
+      : undefined;
 
   if (subtype === 'showroom_general') {
     return { contentType: producerType, contentIds: producerIds };

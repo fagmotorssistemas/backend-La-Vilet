@@ -18,19 +18,21 @@ describe('Schedule website → Graph HTTP interceptado (local)', () => {
   it('build+sendToMeta POSTea Schedule/website al dataset web; body sin BM', async () => {
     const captured: Array<{ url: string; body: Record<string, unknown> }> = [];
 
-    global.fetch = jest.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      const body = JSON.parse(String(init?.body || '{}')) as Record<
-        string,
-        unknown
-      >;
-      captured.push({ url, body });
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({ events_received: 1, fbtrace_id: 'LOCAL_MOCK' }),
-      } as Response;
-    }) as typeof fetch;
+    global.fetch = jest.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const body = JSON.parse(String(init?.body || '{}')) as Record<
+          string,
+          unknown
+        >;
+        captured.push({ url, body });
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ events_received: 1, fbtrace_id: 'LOCAL_MOCK' }),
+        } as Response;
+      },
+    ) as typeof fetch;
 
     const config = {
       get: (key: string) =>

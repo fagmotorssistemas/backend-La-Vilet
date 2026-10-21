@@ -440,9 +440,9 @@ describe('OutboxService — LeadSubmitted Nest flow (Graph simulado)', () => {
     await outbox.tick();
     row = db
       .prepare(
-        `SELECT status FROM outbox_events WHERE event_name = 'LeadSubmitted'`,
+        `SELECT status, next_attempt_at, attempt_count FROM outbox_events WHERE event_name = 'LeadSubmitted'`,
       )
-      .get() as { status: string };
+      .get() as typeof row;
     expect(row.status).toBe('sent');
     expect(graphHits).toBe(2);
     expect(

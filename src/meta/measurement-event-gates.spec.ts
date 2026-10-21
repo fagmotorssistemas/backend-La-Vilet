@@ -90,15 +90,18 @@ describe('measurement-event-gates', () => {
         contentType: 'home_listing',
         contentIds: undefined,
         unitId,
-      }).reason,
-    ).toBe('home_listing_content_ids_must_match_unit_id');
+      }),
+    ).toEqual({
+      ok: false,
+      reason: 'home_listing_content_ids_must_match_unit_id',
+    });
     expect(
       gateHomeListingContent({
         contentType: 'home_listing',
         contentIds: [unitId],
         unitId: null,
-      }).reason,
-    ).toBe('home_listing_unit_id_required');
+      }),
+    ).toEqual({ ok: false, reason: 'home_listing_unit_id_required' });
   });
 
   it('AddToWishlist website + lead + unit', () => {
@@ -140,8 +143,8 @@ describe('measurement-event-gates', () => {
         unitId: 'u1',
         value: 100,
         currency: 'USD',
-      }).reason,
-    ).toBe('purchase_system_generated_crm_only');
+      }),
+    ).toEqual({ ok: false, reason: 'purchase_system_generated_crm_only' });
     expect(
       gatePurchase({
         actionSource: 'system_generated',
@@ -150,8 +153,8 @@ describe('measurement-event-gates', () => {
         unitId: 'u1',
         value: 100,
         currency: null,
-      }).reason,
-    ).toBe('purchase_currency_required_iso4217');
+      }),
+    ).toEqual({ ok: false, reason: 'purchase_currency_required_iso4217' });
     expect(
       gatePurchase({
         actionSource: 'system_generated',
@@ -160,8 +163,8 @@ describe('measurement-event-gates', () => {
         unitId: 'u1',
         value: 0,
         currency: 'USD',
-      }).reason,
-    ).toBe('purchase_value_required');
+      }),
+    ).toEqual({ ok: false, reason: 'purchase_value_required' });
     expect(normalizeCurrency('usd')).toBe('USD');
     expect(normalizeCurrency('$')).toBeNull();
   });

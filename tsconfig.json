@@ -12,7 +12,7 @@
     "allowSyntheticDefaultImports": true,
     "target": "ES2023",
     "sourceMap": true,
-    "rootDir": "./src",
+    "rootDir": ".",
     "outDir": "./dist",
     "incremental": true,
     "skipLibCheck": true,
@@ -23,6 +23,6 @@
     "noFallthroughCasesInSwitch": true,
     "types": ["node", "jest"]
   },
-  "include": ["./src/**/*.ts"],
-  "exclude": ["./node_modules", "./dist", "./test", "./src/**/*.spec.ts"]
+  "include": ["./src/**/*.ts", "./test/**/*.ts"],
+  "exclude": ["./node_modules", "./dist"]
 }

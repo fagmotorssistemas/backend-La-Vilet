@@ -1,55 +1,60 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common'
-import { ConfigService } from '@nestjs/config'
-import { createHash, timingSafeEqual } from 'crypto'
-import { DatabaseService } from '../database/database.service'
-import { resolveWaCloudWebhookFlags } from './whatsapp-flags'
+import {
+  Injectable,
+  Logger,
+  OnModuleDestroy,
+  OnModuleInit,
+} from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { createHash, timingSafeEqual } from 'crypto';
+import { DatabaseService } from '../database/database.service';
+import { resolveWaCloudWebhookFlags } from './whatsapp-flags';
 import {
   assertWabaAndPhone,
   parseWhatsAppCloudWebhookBody,
   type WaCloudInboundMessage,
   type WaCloudParsedChange,
-} from './whatsapp-payload'
-import { verifyMetaHubSignature256 } from './whatsapp-signature'
+} from './whatsapp-payload';
+import { verifyMetaHubSignature256 } from './whatsapp-signature';
 import {
   quotePostgrestEqValue,
   waLeadLookupCandidates,
-} from './wa-lead-lookup'
+} from './wa-lead-lookup';
 
 export type LeadMatch = {
-  id: string
-  contact_id: string | null
-  kommo_id: number | null
-  tenant_id: string
-  project_id: string
-  whatsapp_id: string | null
-  phone_normalized: string | null
-}
+  id: string;
+  contact_id: string | null;
+  kommo_id: number | null;
+  tenant_id: string;
+  project_id: string;
+  whatsapp_id: string | null;
+  phone_normalized: string | null;
+};
 
 type RejectBucket = {
-  count: number
-  last_status: number
-  last_at: string
-}
+  count: number;
+  last_status: number;
+  last_at: string;
+};
 
 @Injectable()
 export class WhatsappWebhookService implements OnModuleInit, OnModuleDestroy {
-  private readonly logger = new Logger(WhatsappWebhookService.name)
+  private readonly logger = new Logger(WhatsappWebhookService.name);
   /** Contadores en memoria (reinicio al redeploy). Solo reasons, sin PII. */
-  private readonly rejectCounts = new Map<string, RejectBucket>()
+  private readonly rejectCounts = new Map<string, RejectBucket>();
   private lastReject: {
-    phase: 'challenge' | 'post'
-    reason: string
-    status: number
-    at: string
-  } | null = null
+    phase: 'challenge' | 'post';
+    reason: string;
+    status: number;
+    at: string;
+  } | null = null;
 
-  private reconcileTimer: NodeJS.Timeout | null = null
-  private reconcileFirst: NodeJS.Timeout | null = null
-  private reconcileRunning = false
-  private reconcileEnabled = false
-  private lastReconcileAt: string | null = null
-  private lastReconcileTried = 0
-  private lastReconcileLinked = 0
+  private reconcileTimer: NodeJS.Timeout | null = null;
+  private reconcileFirst: NodeJS.Timeout | null = null;
+  private reconcileRunning = false;
+  private reconcileEnabled = false;
+  private lastReconcileAt: string | null = null;
+  private lastReconcileTried = 0;
+  private lastReconcileLinked = 0;
 
   constructor(
     private readonly config: ConfigService,
@@ -61,36 +66,37 @@ export class WhatsappWebhookService implements OnModuleInit, OnModuleDestroy {
       this.config.get<string>('META_WA_CTWA_RECONCILE_ENABLED') ?? 'true',
     )
       .trim()
-      .toLowerCase()
+      .toLowerCase();
     if (raw === 'false' || raw === '0' || raw === 'no') {
-      this.reconcileEnabled = false
-      this.logger.log('CTWA reconcile worker deshabilitado')
-      return
+      this.reconcileEnabled = false;
+      this.logger.log('CTWA reconcile worker deshabilitado');
+      return;
     }
-    this.reconcileEnabled = true
-    const poll = Number(this.config.get('META_WA_CTWA_RECONCILE_POLL_MS')) || 30000
+    this.reconcileEnabled = true;
+    const poll =
+      Number(this.config.get('META_WA_CTWA_RECONCILE_POLL_MS')) || 30000;
     this.reconcileTimer = setInterval(() => {
-      void this.tickReconcile()
-    }, poll)
-    this.reconcileFirst = setTimeout(() => void this.tickReconcile(), 2500)
-    this.logger.log(`CTWA reconcile worker activo (poll=${poll}ms)`)
+      void this.tickReconcile();
+    }, poll);
+    this.reconcileFirst = setTimeout(() => void this.tickReconcile(), 2500);
+    this.logger.log(`CTWA reconcile worker activo (poll=${poll}ms)`);
   }
 
   onModuleDestroy() {
-    if (this.reconcileTimer) clearInterval(this.reconcileTimer)
-    if (this.reconcileFirst) clearTimeout(this.reconcileFirst)
-    this.reconcileTimer = null
-    this.reconcileFirst = null
+    if (this.reconcileTimer) clearInterval(this.reconcileTimer);
+    if (this.reconcileFirst) clearTimeout(this.reconcileFirst);
+    this.reconcileTimer = null;
+    this.reconcileFirst = null;
   }
 
   private async tickReconcile() {
-    if (this.reconcileRunning || !this.reconcileEnabled) return
-    this.reconcileRunning = true
+    if (this.reconcileRunning || !this.reconcileEnabled) return;
+    this.reconcileRunning = true;
     try {
-      const result = await this.reconcilePending()
-      this.lastReconcileAt = new Date().toISOString()
-      this.lastReconcileTried = result.tried
-      this.lastReconcileLinked = result.linked
+      const result = await this.reconcilePending();
+      this.lastReconcileAt = new Date().toISOString();
+      this.lastReconcileTried = result.tried;
+      this.lastReconcileLinked = result.linked;
       if (result.tried > 0) {
         this.logger.log(
           JSON.stringify({
@@ -98,7 +104,7 @@ export class WhatsappWebhookService implements OnModuleInit, OnModuleDestroy {
             tried: result.tried,
             linked: result.linked,
           }),
-        )
+        );
       }
     } catch (err) {
       this.logger.warn(
@@ -106,24 +112,29 @@ export class WhatsappWebhookService implements OnModuleInit, OnModuleDestroy {
           event: 'wa_cloud_ctwa_reconcile_error',
           message: err instanceof Error ? err.message : 'unknown',
         }),
-      )
+      );
     } finally {
-      this.reconcileRunning = false
+      this.reconcileRunning = false;
     }
   }
 
   private allowedTestWaIdHash(): string {
     return String(
       this.config.get<string>('META_WA_CLOUD_ALLOWED_WA_ID_SHA256') || '',
-    ).trim().toLowerCase()
+    )
+      .trim()
+      .toLowerCase();
   }
 
   private messageMatchesTestAllowlist(message: WaCloudInboundMessage): boolean {
-    const expected = this.allowedTestWaIdHash()
-    if (!expected) return true
-    if (!/^[a-f0-9]{64}$/.test(expected)) return false
-    const actual = createHash('sha256').update(message.waIdRaw).digest('hex')
-    return timingSafeEqual(Buffer.from(actual, 'hex'), Buffer.from(expected, 'hex'))
+    const expected = this.allowedTestWaIdHash();
+    if (!expected) return true;
+    if (!/^[a-f0-9]{64}$/.test(expected)) return false;
+    const actual = createHash('sha256').update(message.waIdRaw).digest('hex');
+    return timingSafeEqual(
+      Buffer.from(actual, 'hex'),
+      Buffer.from(expected, 'hex'),
+    );
   }
 
   flags() {
@@ -134,7 +145,7 @@ export class WhatsappWebhookService implements OnModuleInit, OnModuleDestroy {
       META_WA_CLOUD_WEBHOOK_RECEIVE_ENABLED: this.config.get<string>(
         'META_WA_CLOUD_WEBHOOK_RECEIVE_ENABLED',
       ),
-    })
+    });
   }
 
   /**
@@ -145,45 +156,45 @@ export class WhatsappWebhookService implements OnModuleInit, OnModuleDestroy {
     reason: string,
     status: number,
   ): void {
-    const key = `${phase}:${reason}`
-    const prev = this.rejectCounts.get(key)
-    const at = new Date().toISOString()
+    const key = `${phase}:${reason}`;
+    const prev = this.rejectCounts.get(key);
+    const at = new Date().toISOString();
     this.rejectCounts.set(key, {
       count: (prev?.count || 0) + 1,
       last_status: status,
       last_at: at,
-    })
-    this.lastReject = { phase, reason, status, at }
+    });
+    this.lastReject = { phase, reason, status, at };
   }
 
   verifyChallenge(query: {
-    mode?: string
-    verifyToken?: string
-    challenge?: string
+    mode?: string;
+    verifyToken?: string;
+    challenge?: string;
   }):
     | { ok: true; challenge: string }
     | { ok: false; status: number; reason: string } {
-    const flags = this.flags()
+    const flags = this.flags();
     if (!flags.challengeEnabled) {
-      return { ok: false, status: 503, reason: 'challenge_disabled' }
+      return { ok: false, status: 503, reason: 'challenge_disabled' };
     }
     const expected = String(
       this.config.get<string>('META_WA_VERIFY_TOKEN') || '',
-    ).trim()
+    ).trim();
     if (!expected) {
-      return { ok: false, status: 503, reason: 'verify_token_missing' }
+      return { ok: false, status: 503, reason: 'verify_token_missing' };
     }
     if (query.mode !== 'subscribe') {
-      return { ok: false, status: 400, reason: 'hub_mode_invalid' }
+      return { ok: false, status: 400, reason: 'hub_mode_invalid' };
     }
     if (String(query.verifyToken || '') !== expected) {
-      return { ok: false, status: 403, reason: 'verify_token_mismatch' }
+      return { ok: false, status: 403, reason: 'verify_token_mismatch' };
     }
-    const challenge = String(query.challenge || '')
+    const challenge = String(query.challenge || '');
     if (!challenge) {
-      return { ok: false, status: 400, reason: 'hub_challenge_missing' }
+      return { ok: false, status: 400, reason: 'hub_challenge_missing' };
     }
-    return { ok: true, challenge }
+    return { ok: true, challenge };
   }
 
   /**
@@ -195,61 +206,66 @@ export class WhatsappWebhookService implements OnModuleInit, OnModuleDestroy {
       appSecret: String(this.config.get<string>('META_WA_APP_SECRET') || ''),
       rawBody,
       signatureHeader,
-    })
+    });
   }
 
   /**
    * Procesa POST firmado. No envía chats ni CAPI.
    * Idempotente por wamid. CTWA solo si referral.ctwa_clid viene informado.
    */
-  async processSignedWebhook(body: unknown): Promise<{
-    ok: true
-    processed: number
-    inserted: number
-    duplicates: number
-    pendingLink: number
-    linked: number
-    noReferral: number
-    rejected?: never
-  } | {
-    ok: false
-    reason: string
-    status: number
-  }> {
-    const flags = this.flags()
+  async processSignedWebhook(body: unknown): Promise<
+    | {
+        ok: true;
+        processed: number;
+        inserted: number;
+        duplicates: number;
+        pendingLink: number;
+        linked: number;
+        noReferral: number;
+        rejected?: never;
+      }
+    | {
+        ok: false;
+        reason: string;
+        status: number;
+      }
+  > {
+    const flags = this.flags();
     if (!flags.receiveEnabled) {
-      return { ok: false, reason: 'receive_disabled', status: 503 }
+      return { ok: false, reason: 'receive_disabled', status: 503 };
     }
 
-    const parsed = parseWhatsAppCloudWebhookBody(body)
+    const parsed = parseWhatsAppCloudWebhookBody(body);
     if (!parsed.ok) {
-      return { ok: false, reason: parsed.reason, status: 400 }
+      return { ok: false, reason: parsed.reason, status: 400 };
     }
 
     const expectedWabaId = String(
       this.config.get<string>('META_WABA_ID') || '',
-    ).trim()
+    ).trim();
     const expectedPhoneNumberId = String(
       this.config.get<string>('META_WA_PHONE_NUMBER_ID') || '',
-    ).trim()
+    ).trim();
 
     // Barrera previa a cualquier escritura: cuando se configura, el lote completo
     // debe pertenecer al único WA ID de prueba autorizado. Nunca registra el WA ID.
     if (
       this.allowedTestWaIdHash() &&
       parsed.changes.some((change) =>
-        change.messages.some((message) => !this.messageMatchesTestAllowlist(message)),
+        change.messages.some(
+          (message) => !this.messageMatchesTestAllowlist(message),
+        ),
       )
     ) {
-      return { ok: false, reason: 'test_wa_id_not_allowed', status: 403 }
+      return { ok: false, reason: 'test_wa_id_not_allowed', status: 403 };
     }
 
-    let processed = 0
-    let inserted = 0
-    let duplicates = 0
-    let pendingLink = 0
-    let linked = 0
-    let noReferral = 0
+    let processed = 0;
+    let inserted = 0;
+    let duplicates = 0;
+    let pendingLink = 0;
+    let linked = 0;
+    let noReferral = 0;
 
     for (const change of parsed.changes) {
       const gate = assertWabaAndPhone({
@@ -257,27 +273,30 @@ export class WhatsappWebhookService implements OnModuleInit, OnModuleDestroy {
         phoneNumberId: change.phoneNumberId,
         expectedWabaId,
         expectedPhoneNumberId,
-      })
+      });
       if (!gate.ok) {
         this.logger.warn(
           JSON.stringify({
             event: 'wa_cloud_webhook_rejected',
             reason: gate.reason,
           }),
-        )
-        return { ok: false, reason: gate.reason, status: 403 }
+        );
+        return { ok: false, reason: gate.reason, status: 403 };
       }
 
       for (const message of change.messages) {
-        const result = await this.persistMessage(change, message)
-        processed += 1
-        if (result.duplicate) duplicates += 1
-        else inserted += 1
-        if (result.linkStatus === 'seen_no_referral') noReferral += 1
-        if (result.linkStatus === 'pending_link' || result.linkStatus === 'pending_ambiguous') {
-          pendingLink += 1
+        const result = await this.persistMessage(change, message);
+        processed += 1;
+        if (result.duplicate) duplicates += 1;
+        else inserted += 1;
+        if (result.linkStatus === 'seen_no_referral') noReferral += 1;
+        if (
+          result.linkStatus === 'pending_link' ||
+          result.linkStatus === 'pending_ambiguous'
+        ) {
+          pendingLink += 1;
         }
-        if (result.linkStatus === 'linked') linked += 1
+        if (result.linkStatus === 'linked') linked += 1;
       }
     }
 
@@ -289,16 +308,16 @@ export class WhatsappWebhookService implements OnModuleInit, OnModuleDestroy {
       pendingLink,
       linked,
       noReferral,
-    }
+    };
   }
 
   private async persistMessage(
     change: WaCloudParsedChange,
     message: WaCloudInboundMessage,
   ): Promise<{ duplicate: boolean; linkStatus: string }> {
-    const hasCtwa = Boolean(message.referral?.ctwaClid)
-    const initialStatus = hasCtwa ? 'pending_link' : 'seen_no_referral'
-    const extract = message.ctwaExtract
+    const hasCtwa = Boolean(message.referral?.ctwaClid);
+    const initialStatus = hasCtwa ? 'pending_link' : 'seen_no_referral';
+    const extract = message.ctwaExtract;
     const { inserted, row } = this.db.insertWaCloudReceipt({
       wamid: message.wamid,
       waIdRaw: message.waIdRaw,
@@ -316,7 +335,7 @@ export class WhatsappWebhookService implements OnModuleInit, OnModuleDestroy {
       referralObjectPresent: extract.referral_object_present,
       ctwaClidKeyPresent: extract.ctwa_clid_key_present,
       messageTimestamp: message.timestamp,
-    })
+    });
 
     this.logger.log(
       JSON.stringify({
@@ -333,59 +352,62 @@ export class WhatsappWebhookService implements OnModuleInit, OnModuleDestroy {
         message_timestamp_present: Boolean(message.timestamp),
         // sin clid, wa_id ni texto
       }),
-    )
+    );
 
     if (!inserted) {
-      return { duplicate: true, linkStatus: row.link_status }
+      return { duplicate: true, linkStatus: row.link_status };
     }
     if (!hasCtwa) {
       // Sin CTWA usable: no correlaciona lead (kommo_id/lead_id quedan null a propósito).
-      return { duplicate: false, linkStatus: 'seen_no_referral' }
+      return { duplicate: false, linkStatus: 'seen_no_referral' };
     }
 
-    const linkStatus = await this.correlateAndMaybeSync(row.wamid)
-    return { duplicate: false, linkStatus }
+    const linkStatus = await this.correlateAndMaybeSync(row.wamid);
+    return { duplicate: false, linkStatus };
   }
 
   async correlateAndMaybeSync(wamid: string): Promise<string> {
-    const row = this.db.getWaCloudReceipt(wamid)
+    const row = this.db.getWaCloudReceipt(wamid);
     if (!row || !row.has_ctwa || !row.ctwa_clid) {
-      return row?.link_status || 'seen_no_referral'
+      return row?.link_status || 'seen_no_referral';
     }
     if (row.link_status === 'linked' && row.supabase_synced) {
-      return 'linked'
+      return 'linked';
     }
 
-    const matches = await this.findLeadMatches(row.wa_id_normalized, row.wa_id_raw)
+    const matches = await this.findLeadMatches(
+      row.wa_id_normalized,
+      row.wa_id_raw,
+    );
     if (matches.error === 'lead_lookup_failed') {
       this.db.updateWaCloudReceiptLink(wamid, {
         linkStatus: 'pending_link',
         lastError: 'lead_lookup_failed',
-      })
-      return 'pending_link'
+      });
+      return 'pending_link';
     }
     if (matches.rows.length === 0) {
       this.db.updateWaCloudReceiptLink(wamid, {
         linkStatus: 'pending_link',
         lastError: 'lead_not_found',
-      })
-      return 'pending_link'
+      });
+      return 'pending_link';
     }
     if (matches.rows.length > 1) {
       this.db.updateWaCloudReceiptLink(wamid, {
         linkStatus: 'pending_ambiguous',
         lastError: 'multiple_leads_for_wa_id',
-      })
+      });
       this.logger.warn(
         JSON.stringify({
           event: 'wa_cloud_correlate_ambiguous',
           match_count: matches.rows.length,
         }),
-      )
-      return 'pending_ambiguous'
+      );
+      return 'pending_ambiguous';
     }
 
-    const lead = matches.rows[0]
+    const lead = matches.rows[0];
     if (!lead.contact_id || lead.kommo_id == null) {
       this.db.updateWaCloudReceiptLink(wamid, {
         linkStatus: 'pending_link',
@@ -393,8 +415,8 @@ export class WhatsappWebhookService implements OnModuleInit, OnModuleDestroy {
         tenantId: lead.tenant_id,
         projectId: lead.project_id,
         lastError: 'lead_missing_kommo_contact',
-      })
-      return 'pending_link'
+      });
+      return 'pending_link';
     }
 
     this.db.updateWaCloudReceiptLink(wamid, {
@@ -405,7 +427,7 @@ export class WhatsappWebhookService implements OnModuleInit, OnModuleDestroy {
       tenantId: lead.tenant_id,
       projectId: lead.project_id,
       lastError: null,
-    })
+    });
 
     const synced = await this.syncPreserveCtwa({
       tenantId: lead.tenant_id,
@@ -418,103 +440,105 @@ export class WhatsappWebhookService implements OnModuleInit, OnModuleDestroy {
       sourceUrl: row.source_url,
       referralSourceType: row.referral_source_type,
       externalMessageId: row.wamid,
-    })
+    });
 
     this.db.updateWaCloudReceiptLink(wamid, {
       linkStatus: synced.ok ? 'linked' : 'sync_failed',
       supabaseSynced: synced.ok,
       lastError: synced.ok ? null : synced.reason,
-    })
-    return synced.ok ? 'linked' : 'sync_failed'
+    });
+    return synced.ok ? 'linked' : 'sync_failed';
   }
 
-  async reconcilePending(limit = 50): Promise<{ tried: number; linked: number }> {
-    const pending = this.db.listPendingWaCloudReceipts(limit)
-    let linked = 0
+  async reconcilePending(
+    limit = 50,
+  ): Promise<{ tried: number; linked: number }> {
+    const pending = this.db.listPendingWaCloudReceipts(limit);
+    let linked = 0;
     for (const row of pending) {
-      const status = await this.correlateAndMaybeSync(row.wamid)
-      if (status === 'linked') linked += 1
+      const status = await this.correlateAndMaybeSync(row.wamid);
+      if (status === 'linked') linked += 1;
     }
-    return { tried: pending.length, linked }
+    return { tried: pending.length, linked };
   }
 
   private async findLeadMatches(
     waIdNormalized: string | null,
     waIdRaw: string,
   ): Promise<{ rows: LeadMatch[]; error?: 'lead_lookup_failed' }> {
-    const url = String(this.config.get<string>('SUPABASE_URL') || '').trim()
+    const url = String(this.config.get<string>('SUPABASE_URL') || '').trim();
     const key = String(
       this.config.get<string>('SUPABASE_SERVICE_ROLE_KEY') || '',
-    ).trim()
+    ).trim();
     if (!url || !key) {
-      return { rows: [], error: 'lead_lookup_failed' }
+      return { rows: [], error: 'lead_lookup_failed' };
     }
 
-    const candidates = waLeadLookupCandidates(waIdNormalized, waIdRaw)
+    const candidates = waLeadLookupCandidates(waIdNormalized, waIdRaw);
     if (!candidates.length) {
-      return { rows: [] }
+      return { rows: [] };
     }
 
-    const byId = new Map<string, LeadMatch>()
-    let lookupsOk = 0
-    let lookupsFailed = 0
+    const byId = new Map<string, LeadMatch>();
+    let lookupsOk = 0;
+    let lookupsFailed = 0;
 
     for (const candidate of candidates) {
-      const quoted = quotePostgrestEqValue(candidate)
+      const quoted = quotePostgrestEqValue(candidate);
       const qs = new URLSearchParams({
         select:
           'id,contact_id,kommo_id,tenant_id,project_id,whatsapp_id,phone_normalized',
         or: `(whatsapp_id.eq.${quoted},phone_normalized.eq.${quoted})`,
         limit: '5',
-      })
+      });
       const res = await fetch(`${url}/rest/v1/leads?${qs}`, {
         headers: {
           apikey: key,
           Authorization: `Bearer ${key}`,
         },
-      })
+      });
       if (!res.ok) {
-        lookupsFailed += 1
+        lookupsFailed += 1;
         this.logger.warn(
           JSON.stringify({
             event: 'wa_cloud_lead_lookup_failed',
             http: res.status,
           }),
-        )
-        continue
+        );
+        continue;
       }
-      lookupsOk += 1
-      const rows = (await res.json()) as LeadMatch[]
+      lookupsOk += 1;
+      const rows = (await res.json()) as LeadMatch[];
       for (const row of rows) {
-        if (row?.id) byId.set(row.id, row)
+        if (row?.id) byId.set(row.id, row);
       }
     }
 
     if (lookupsOk === 0 && lookupsFailed > 0) {
-      return { rows: [], error: 'lead_lookup_failed' }
+      return { rows: [], error: 'lead_lookup_failed' };
     }
-    return { rows: [...byId.values()] }
+    return { rows: [...byId.values()] };
   }
 
   private async syncPreserveCtwa(input: {
-    tenantId: string
-    projectId: string
-    contactId: string
-    kommoId: number
-    ctwaClid: string
-    fieldPath: string
-    sourceId: string | null
-    sourceUrl: string | null
-    referralSourceType: string | null
-    externalMessageId: string
+    tenantId: string;
+    projectId: string;
+    contactId: string;
+    kommoId: number;
+    ctwaClid: string;
+    fieldPath: string;
+    sourceId: string | null;
+    sourceUrl: string | null;
+    referralSourceType: string | null;
+    externalMessageId: string;
   }): Promise<{ ok: true } | { ok: false; reason: string }> {
-    const url = String(this.config.get<string>('SUPABASE_URL') || '').trim()
+    const url = String(this.config.get<string>('SUPABASE_URL') || '').trim();
     const key = String(
       this.config.get<string>('SUPABASE_SERVICE_ROLE_KEY') || '',
-    ).trim()
+    ).trim();
     if (!url || !key) {
       // Persistencia local ya ocurrió; sync CRM opcional hasta tener credenciales.
-      return { ok: false, reason: 'supabase_not_configured' }
+      return { ok: false, reason: 'supabase_not_configured' };
     }
 
     const res = await fetch(`${url}/rest/v1/rpc/lv_app_preserve_ctwa`, {
@@ -536,28 +560,28 @@ export class WhatsappWebhookService implements OnModuleInit, OnModuleDestroy {
         p_referral_source_type: input.referralSourceType,
         p_external_message_id: input.externalMessageId,
       }),
-    })
+    });
     if (!res.ok) {
-      return { ok: false, reason: `preserve_http_${res.status}` }
+      return { ok: false, reason: `preserve_http_${res.status}` };
     }
-    const json = (await res.json()) as { ok?: boolean; action?: string }
+    const json = (await res.json()) as { ok?: boolean; action?: string };
     if (json?.ok !== true) {
-      return { ok: false, reason: 'preserve_rejected' }
+      return { ok: false, reason: 'preserve_rejected' };
     }
     this.logger.log(
       JSON.stringify({
         event: 'wa_cloud_ctwa_preserved',
         action: json.action || null,
       }),
-    )
-    return { ok: true }
+    );
+    return { ok: true };
   }
 
   healthSnapshot() {
-    const flags = this.flags()
-    const reject_counts: Record<string, RejectBucket> = {}
+    const flags = this.flags();
+    const reject_counts: Record<string, RejectBucket> = {};
     for (const [key, value] of this.rejectCounts.entries()) {
-      reject_counts[key] = value
+      reject_counts[key] = value;
     }
     return {
       challenge_enabled: flags.challengeEnabled,
@@ -589,6 +613,6 @@ export class WhatsappWebhookService implements OnModuleInit, OnModuleDestroy {
         poll_ms:
           Number(this.config.get('META_WA_CTWA_RECONCILE_POLL_MS')) || 30000,
       },
-    }
+    };
   }
 }

@@ -6,15 +6,13 @@
  *   en silencio — responde 503 receive_disabled (tras validar firma si aplica).
  */
 export function isTruthyEnv(raw: unknown): boolean {
-  return String(raw || '')
-    .trim()
-    .toLowerCase() === 'true'
+  return (typeof raw === 'string' ? raw : '').trim().toLowerCase() === 'true';
 }
 
 export type WaCloudWebhookFlags = {
-  challengeEnabled: boolean
-  receiveEnabled: boolean
-}
+  challengeEnabled: boolean;
+  receiveEnabled: boolean;
+};
 
 export function resolveWaCloudWebhookFlags(
   env: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env,
@@ -22,5 +20,5 @@ export function resolveWaCloudWebhookFlags(
   return {
     challengeEnabled: isTruthyEnv(env.META_WA_CLOUD_WEBHOOK_CHALLENGE_ENABLED),
     receiveEnabled: isTruthyEnv(env.META_WA_CLOUD_WEBHOOK_RECEIVE_ENABLED),
-  }
+  };
 }

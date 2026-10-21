@@ -118,7 +118,7 @@ describe('EventsService — Business Messaging gates', () => {
   });
 
   it('LeadSubmitted BM válido usa messaging dataset (no pixel web)', () => {
-    const { service, db } = makeService();
+    const { service } = makeService();
     const result = service.enqueue({
       ...base,
       event_name: 'LeadSubmitted',

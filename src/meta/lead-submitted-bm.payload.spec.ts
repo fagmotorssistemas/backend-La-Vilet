@@ -26,7 +26,7 @@ describe('LeadSubmitted business_messaging payload', () => {
       messagingDatasetId: 'MSG_DS',
       match: { phone: '593990000001', externalId: 'lead-1' },
     });
-    const event = built.payload.data[0] as Record<string, unknown>;
+    const event = (built.payload.data as Array<Record<string, unknown>>)[0];
     const userData = event.user_data as Record<string, unknown>;
     expect(event.event_name).toBe('LeadSubmitted');
     expect(event.action_source).toBe('business_messaging');

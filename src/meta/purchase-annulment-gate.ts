@@ -7,17 +7,17 @@ export type PurchaseAnnulmentDecision =
   | { action: 'cancel'; reason: 'contract_anulado' | 'sale_missing' }
   | { action: 'hold_retry'; reason: 'sale_lookup_transient' }
   | {
-      action: 'annotate_after_accept'
-      reason: 'annulled_after_meta_accepted'
-    }
+      action: 'annotate_after_accept';
+      reason: 'annulled_after_meta_accepted';
+    };
 
 export type PurchaseSaleSnapshot = {
-  saleId: string
-  contractId: string | null
-  contractStatus: string | null
+  saleId: string;
+  contractId: string | null;
+  contractStatus: string | null;
   /** true si la fila outbox Nest ya está sent con evidencia Graph. */
-  nestAlreadyAccepted: boolean
-}
+  nestAlreadyAccepted: boolean;
+};
 
 /**
  * - Anulado antes de enviar → cancel
@@ -30,39 +30,40 @@ export function decidePurchaseAnnulment(
   opts?: { lookupFailed?: boolean },
 ): PurchaseAnnulmentDecision {
   if (opts?.lookupFailed) {
-    return { action: 'hold_retry', reason: 'sale_lookup_transient' }
+    return { action: 'hold_retry', reason: 'sale_lookup_transient' };
   }
   if (!input || !String(input.saleId || '').trim()) {
-    return { action: 'cancel', reason: 'sale_missing' }
+    return { action: 'cancel', reason: 'sale_missing' };
   }
   const status = String(input.contractStatus || '')
     .trim()
-    .toLowerCase()
+    .toLowerCase();
   if (status === 'anulado') {
     if (input.nestAlreadyAccepted) {
       return {
         action: 'annotate_after_accept',
         reason: 'annulled_after_meta_accepted',
-      }
+      };
     }
-    return { action: 'cancel', reason: 'contract_anulado' }
+    return { action: 'cancel', reason: 'contract_anulado' };
   }
-  return { action: 'allow_send' }
+  return { action: 'allow_send' };
 }
 
 export function saleIdFromPurchaseRow(row: {
-  idempotency_key?: string | null
-  payload_redacted?: string | null
+  idempotency_key?: string | null;
+  payload_redacted?: string | null;
 }): string | null {
-  const key = String(row.idempotency_key || '')
-  const m = /^purchase:(.+)$/i.exec(key)
-  if (m?.[1]) return m[1].trim() || null
-  if (!row.payload_redacted) return null
+  const key = String(row.idempotency_key || '');
+  const m = /^purchase:(.+)$/i.exec(key);
+  if (m?.[1]) return m[1].trim() || null;
+  if (!row.payload_redacted) return null;
   try {
-    const parsed = JSON.parse(row.payload_redacted) as Record<string, unknown>
-    const sale = String(parsed.sale_id || '').trim()
-    return sale || null
+    const parsed = JSON.parse(row.payload_redacted) as Record<string, unknown>;
+    const sale =
+      typeof parsed.sale_id === 'string' ? parsed.sale_id.trim() : '';
+    return sale || null;
   } catch {
-    return null
+    return null;
   }
 }

@@ -9,7 +9,10 @@ import {
 
 function validateDto(raw: Record<string, unknown>) {
   const dto = plainToInstance(EnqueueEventDto, raw);
-  return { dto, errors: validateSync(dto, { whitelist: true, forbidNonWhitelisted: true }) };
+  return {
+    dto,
+    errors: validateSync(dto, { whitelist: true, forbidNonWhitelisted: true }),
+  };
 }
 
 describe('measurement enqueue allowlist + gates', () => {
@@ -56,8 +59,8 @@ describe('measurement enqueue allowlist + gates', () => {
         unitId: base.event_id,
         value: 10,
         currency: null,
-      }).reason,
-    ).toBe('purchase_currency_required_iso4217');
+      }),
+    ).toEqual({ ok: false, reason: 'purchase_currency_required_iso4217' });
     expect(
       gatePurchase({
         actionSource: 'website',
@@ -66,7 +69,7 @@ describe('measurement enqueue allowlist + gates', () => {
         unitId: base.event_id,
         value: 10,
         currency: 'USD',
-      }).reason,
-    ).toBe('purchase_system_generated_crm_only');
+      }),
+    ).toEqual({ ok: false, reason: 'purchase_system_generated_crm_only' });
   });
 });

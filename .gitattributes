@@ -1,0 +1,6 @@
+# Normaliza finales de línea: LF en el repo y en el working tree.
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.png binary
+*.jpg binary
+*.db binary

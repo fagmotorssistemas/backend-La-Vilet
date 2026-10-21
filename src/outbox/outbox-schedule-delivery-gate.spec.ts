@@ -20,16 +20,15 @@ describe('OutboxService — Schedule delivery gate', () => {
     store = new SqliteOutboxStore(db);
     store.migrate();
     database = {
-      claimPending: (limit: number, lane: 'test' | 'live', opts?: { excludeSchedule?: boolean }) =>
-        store.claimPending(limit, lane, opts),
+      claimPending: (
+        limit: number,
+        lane: 'test' | 'live',
+        opts?: { excludeSchedule?: boolean },
+      ) => store.claimPending(limit, lane, opts),
       getOutboxById: (id: number) => store.getOutboxById(id),
       markSent: (id: number, body: unknown) => store.markSent(id, body),
-      markRetry: (
-        id: number,
-        error: string,
-        next: string,
-        dead: boolean,
-      ) => store.markRetry(id, error, next, dead),
+      markRetry: (id: number, error: string, next: string, dead: boolean) =>
+        store.markRetry(id, error, next, dead),
       cancelProcessingIfRevoked: (id: number) =>
         store.cancelProcessingIfRevoked(id),
       releaseProcessingToPending: (id: number, reason: string) =>
@@ -47,18 +46,20 @@ describe('OutboxService — Schedule delivery gate', () => {
 
   it('Schedule ya encolado + delivery OFF: no Graph Schedule; Lead sí; Schedule sigue pending', async () => {
     const graphUrls: string[] = [];
-    global.fetch = jest.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      graphUrls.push(String(input));
-      const body = JSON.parse(String(init?.body || '{}')) as {
-        data?: Array<{ event_name?: string }>;
-      };
-      expect(body.data?.[0]?.event_name).not.toBe('Schedule');
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({ events_received: 1, fbtrace_id: 'LOCAL' }),
-      } as Response;
-    }) as typeof fetch;
+    global.fetch = jest.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        graphUrls.push(String(input));
+        const body = JSON.parse(String(init?.body || '{}')) as {
+          data?: Array<{ event_name?: string }>;
+        };
+        expect(body.data?.[0]?.event_name).not.toBe('Schedule');
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ events_received: 1, fbtrace_id: 'LOCAL' }),
+        } as Response;
+      },
+    ) as typeof fetch;
 
     const schedulePayload = {
       data: [

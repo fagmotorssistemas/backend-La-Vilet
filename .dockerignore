@@ -20,3 +20,4 @@ test
 Dockerfile*
 docker-compose*.yml
 .dockerignore
+*.tsbuildinfo

@@ -145,9 +145,9 @@ describe('SqliteOutboxStore comportamiento', () => {
       store.revokeConsent('visitor', 'v-x', 500);
       store.cancelProcessingIfRevoked(claimed[0].id);
       expect(store.markSent(claimed[0].id, { ok: true })).toBe(false);
-      expect(store.markRetry(claimed[0].id, 'x', new Date().toISOString(), false)).toBe(
-        false,
-      );
+      expect(
+        store.markRetry(claimed[0].id, 'x', new Date().toISOString(), false),
+      ).toBe(false);
       expect(store.getOutboxById(claimed[0].id)?.status).toBe('cancelled');
     } finally {
       close();
@@ -162,14 +162,20 @@ describe('SqliteOutboxStore comportamiento', () => {
       // Simula ledger Supabase drenado en orden: v10 revoke, luego v11 grant
       store.revokeConsent('lead', leadId, 10);
       store.revokeConsent('visitor', visitor, 10);
-      expect(store.isConsentRevoked({ leadId, visitorKey: visitor })).toBe(true);
+      expect(store.isConsentRevoked({ leadId, visitorKey: visitor })).toBe(
+        true,
+      );
       expect(store.grantConsent('visitor', visitor, 9)).toBe(false); // atrasado
       expect(store.grantConsent('lead', leadId, 9)).toBe(false);
-      expect(store.isConsentRevoked({ leadId, visitorKey: visitor })).toBe(true);
+      expect(store.isConsentRevoked({ leadId, visitorKey: visitor })).toBe(
+        true,
+      );
 
       expect(store.grantConsent('lead', leadId, 11)).toBe(true);
       expect(store.grantConsent('visitor', visitor, 11)).toBe(true);
-      expect(store.isConsentRevoked({ leadId, visitorKey: visitor })).toBe(false);
+      expect(store.isConsentRevoked({ leadId, visitorKey: visitor })).toBe(
+        false,
+      );
       expect(store.getConsentVersion('lead', leadId)).toBe(11);
       expect(store.getConsentVersion('visitor', visitor)).toBe(11);
 
@@ -194,9 +200,9 @@ describe('SqliteOutboxStore comportamiento', () => {
   it('revokeConsent/grantConsent exigen consent_version persistido', () => {
     const { store, close } = tempDb();
     try {
-      expect(() =>
-        store.revokeConsent('visitor', 'v', Number.NaN),
-      ).toThrow(/consent_version_required/);
+      expect(() => store.revokeConsent('visitor', 'v', Number.NaN)).toThrow(
+        /consent_version_required/,
+      );
       expect(() => store.grantConsent('lead', 'x', 0)).toThrow(
         /consent_version_required/,
       );
@@ -211,7 +217,9 @@ describe('SqliteOutboxStore comportamiento', () => {
       const ownerA = 'worker-a';
       const ownerB = 'worker-b';
       expect(store.tryAcquireLock('supabase_drain', ownerA, 30_000)).toBe(true);
-      expect(store.tryAcquireLock('supabase_drain', ownerB, 30_000)).toBe(false);
+      expect(store.tryAcquireLock('supabase_drain', ownerB, 30_000)).toBe(
+        false,
+      );
 
       // Simula reinicio: lock expirado → otro worker puede continuar el drain
       store.forceExpireLock(
@@ -268,7 +276,9 @@ describe('SqliteOutboxStore comportamiento', () => {
         event_name: 'ViewContent',
         event_time: 1_700_000_001,
         payload_redacted: {},
-        graph_payload: { data: [{ event_id: '73332442-ad30-41cb-a84e-213062c81807' }] },
+        graph_payload: {
+          data: [{ event_id: '73332442-ad30-41cb-a84e-213062c81807' }],
+        },
         dataset_id: 'ds',
         delivery_lane: 'test',
       });

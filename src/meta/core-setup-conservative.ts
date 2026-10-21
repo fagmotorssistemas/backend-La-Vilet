@@ -30,7 +30,7 @@ export function applyCoreSetupConservativeToGraphBody(
   body: Record<string, unknown>,
 ): Record<string, unknown> {
   const out: Record<string, unknown> = { ...body };
-  const data = Array.isArray(body.data) ? body.data : null;
+  const data = Array.isArray(body.data) ? (body.data as unknown[]) : null;
   if (!data) {
     delete out.custom_data;
     return out;

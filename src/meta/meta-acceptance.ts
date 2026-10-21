@@ -5,9 +5,7 @@
  */
 
 export type MetaAcceptanceTier =
-  | 'api_accepted'
-  | 'api_rejected'
-  | 'insufficient_evidence';
+  'api_accepted' | 'api_rejected' | 'insufficient_evidence';
 
 export type MetaAcceptanceEvidence = {
   tier: MetaAcceptanceTier;
