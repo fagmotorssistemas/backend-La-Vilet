@@ -1,5 +1,10 @@
 # Contrato conciliado CAPI La Vilet
 
+> **Actualización 2026-10-21:** `Purchase` pasó a ser el contacto calificado y la
+> venta real es `VentaCerrada`; se añadieron `Search` e `InitiateCheckout`. Para
+> esos eventos manda `CAPI_SIGNAL_MODEL_20261021.md`. Las filas Purchase de este
+> documento describen hoy a `VentaCerrada`.
+
 Fecha: 2026-09-24. Fuentes contrastadas: implementación frontend actual, `META_CAPI_FRONTEND_CONTRACT.md`, `META_EVENTS_MATRIX.md`, `META_NEST_BACKEND_CONTRACT.md` y backend Nest. Este documento es el contrato de integración para la activación coordinada.
 
 ## Incompatibilidades encontradas

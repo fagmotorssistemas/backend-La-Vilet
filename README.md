@@ -36,10 +36,17 @@ Contrato conciliado frontend/backend: [`docs/CAPI_CONTRACT_FINAL.md`](docs/CAPI_
 
 ## API
 
-| Método | Ruta             | Auth                           |
-| ------ | ---------------- | ------------------------------ |
-| GET    | `/api/health`    | Pública (sin secretos)         |
-| POST   | `/api/v1/events` | `X-Internal-Secret` o `Bearer` |
+| Método | Ruta                      | Auth                                |
+| ------ | ------------------------- | ----------------------------------- |
+| GET    | `/api/health`             | Pública (sin secretos)              |
+| POST   | `/api/v1/events`          | `X-Internal-Secret` o `Bearer`      |
+| GET    | `/api/v1/events/:eventId` | `X-Internal-Secret` o `Bearer`      |
+| POST   | `/api/v1/consent/revoke`  | `X-Internal-Secret` o `Bearer`      |
+| POST   | `/api/v1/consent/grant`   | `X-Internal-Secret` o `Bearer`      |
+| GET    | `/api/whatsapp/webhook`   | `hub.verify_token` (handshake Meta) |
+| POST   | `/api/whatsapp/webhook`   | Firma `X-Hub-Signature-256` de Meta |
+
+Eventos y reglas de envío: `docs/CAPI_SIGNAL_MODEL_20261021.md`.
 
 ## Desarrollo local
 
