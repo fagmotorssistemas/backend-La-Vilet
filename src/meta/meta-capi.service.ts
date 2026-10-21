@@ -13,6 +13,19 @@ import {
 } from './core-setup-conservative';
 
 export type MetaMode = 'disabled' | 'test' | 'live';
+
+/** Graph: errores temporales y límites de tasa (reintento con espera). */
+const META_TRANSIENT_ERROR_CODES = new Set([1, 2, 4, 17, 32, 613]);
+
+/**
+ * Graph: credencial o permisos (190 token, 102 sesión, 10 y 200–299 permisos).
+ * No dependen del evento: se resuelven corrigiendo el token o los permisos.
+ */
+export function isMetaAuthErrorCode(code: number): boolean {
+  return (
+    code === 190 || code === 102 || code === 10 || (code >= 200 && code <= 299)
+  );
+}
 export type MetaEventName =
   | 'ViewContent'
   | 'Lead'
@@ -449,6 +462,11 @@ export class MetaCapiService {
     eventsReceived: number | null;
     fbtraceId: string | null;
     retryable: boolean;
+    /**
+     * Token inválido, caducado o sin permisos: no es culpa del evento. El
+     * worker lo retiene en vez de descartarlo, hasta que se corrija la credencial.
+     */
+    authError: boolean;
     errorMessage: string | null;
     bodyRedacted: Record<string, unknown>;
   }> {
@@ -464,6 +482,7 @@ export class MetaCapiService {
         eventsReceived: null,
         fbtraceId: null,
         retryable: false,
+        authError: false,
         errorMessage:
           credentialLane === 'whatsapp_messaging'
             ? 'Falta META_WA_CAPI_ACCESS_TOKEN'
@@ -509,7 +528,11 @@ export class MetaCapiService {
         !ok &&
         (response.status === 429 ||
           response.status >= 500 ||
-          (errorCode !== null && [1, 2, 4, 17].includes(errorCode)));
+          (errorCode !== null && META_TRANSIENT_ERROR_CODES.has(errorCode)));
+      const authError =
+        !ok &&
+        (response.status === 401 ||
+          (errorCode !== null && isMetaAuthErrorCode(errorCode)));
 
       const errorMessageText =
         typeof error?.message === 'string'
@@ -530,6 +553,7 @@ export class MetaCapiService {
         eventsReceived,
         fbtraceId: typeof body.fbtrace_id === 'string' ? body.fbtrace_id : null,
         retryable,
+        authError,
         errorMessage: error
           ? errorMessageText
           : ok
@@ -552,6 +576,7 @@ export class MetaCapiService {
         eventsReceived: null,
         fbtraceId: null,
         retryable: true,
+        authError: false,
         errorMessage: message.slice(0, 200),
         bodyRedacted: { network_error: true },
       };

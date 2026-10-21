@@ -249,6 +249,25 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
           eventName: fresh.event_name,
         });
 
+        if (!result.ok && result.authError) {
+          // Token caducado/revocado o sin permisos: el evento no tiene la culpa.
+          // Se conserva pending (sin contar intento) hasta corregir la credencial.
+          const errorCode = result.bodyRedacted.error_code;
+          const code =
+            typeof errorCode === 'number'
+              ? String(errorCode)
+              : `http_${result.httpStatus}`;
+          this.db.releaseProcessingToPending(
+            row.id,
+            `meta_auth_error:${code}`,
+            { retryAfterSec: META_AUTH_HOLD_SEC },
+          );
+          this.logger.error(
+            `outbox hold meta_auth_error code=${code} id=${row.id} event=${fresh.event_name}`,
+          );
+          continue;
+        }
+
         const evidence = evaluateMetaAcceptanceEvidence({
           httpOk: result.httpStatus >= 200 && result.httpStatus < 300,
           httpStatus: result.httpStatus,
@@ -497,6 +516,10 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
       .replace(/\/$/, '');
   }
 
+  private supabaseTimeoutMs() {
+    return Number(this.config.get('SUPABASE_HTTP_TIMEOUT_MS')) || 10000;
+  }
+
   private serviceRoleKey() {
     return String(
       this.config.get<string>('SUPABASE_SERVICE_ROLE_KEY') || '',
@@ -521,6 +544,7 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
           apikey: key,
           Authorization: `Bearer ${key}`,
         },
+        signal: AbortSignal.timeout(this.supabaseTimeoutMs()),
       });
       if (!res.ok) return null;
       const rows = (await res.json()) as Array<{
@@ -590,6 +614,7 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
           apikey: key,
           Authorization: `Bearer ${key}`,
         },
+        signal: AbortSignal.timeout(this.supabaseTimeoutMs()),
       });
       if (!res.ok) {
         return decideWaLeadSubmittedConsentGate({
@@ -745,6 +770,9 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
     }
   }
 }
+
+/** Espera antes de reintentar tras un error de credencial de Meta. */
+const META_AUTH_HOLD_SEC = 600;
 
 /** Respuestas de Supabase que no cambian al reintentar. */
 const RESULT_SYNC_PERMANENT_HTTP = new Set([400, 409, 422]);
