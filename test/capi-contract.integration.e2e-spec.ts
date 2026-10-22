@@ -26,15 +26,13 @@ describe('contrato frontend/backend conciliado (integración aislada)', () => {
     ),
   ) as Fixture[];
   // Contrato 2026-10: la venta real es VentaCerrada y Purchase es el contacto
-  // calificado. Mientras el frontend publique la venta como Purchase en sus
-  // fixtures, se traduce aquí (y se prueba aparte que el formato antiguo se rechaza).
-  const legacySale = rawFixtures.find(
-    (item) =>
-      item.event_name === 'Purchase' &&
-      item.action_source === 'system_generated',
-  );
+  // calificado. Acepta fixtures del frontend en ambos formatos: si aún publica la
+  // venta como Purchase system_generated, se traduce aquí; el formato antiguo se
+  // prueba aparte (debe rechazarse).
+  const isLegacySale = (item: Fixture) =>
+    item.event_name === 'Purchase' && item.action_source === 'system_generated';
   const fixtures: Fixture[] = rawFixtures.map((item) =>
-    item === legacySale
+    isLegacySale(item)
       ? {
           ...item,
           event_name: 'VentaCerrada',
@@ -44,6 +42,9 @@ describe('contrato frontend/backend conciliado (integración aislada)', () => {
           ),
         }
       : item,
+  );
+  const saleFixture = fixtures.find(
+    (item) => item.event_name === 'VentaCerrada',
   );
   let app: INestApplication;
   let database: DatabaseService;
@@ -114,7 +115,7 @@ describe('contrato frontend/backend conciliado (integración aislada)', () => {
         'AddToWishlist',
         'Schedule',
         'LeadSubmitted',
-        legacySale ? 'VentaCerrada' : 'Purchase',
+        'VentaCerrada',
       ]),
     );
 
@@ -304,10 +305,15 @@ describe('contrato frontend/backend conciliado (integración aislada)', () => {
   });
 
   it('rechaza la venta con el formato antiguo (Purchase system_generated)', async () => {
-    if (!legacySale) return;
+    expect(saleFixture).toBeDefined();
+    const sale = saleFixture as Fixture;
     const response = await post({
-      ...legacySale,
-      idempotency_key: `${legacySale.idempotency_key}:legacy`,
+      ...sale,
+      event_name: 'Purchase',
+      idempotency_key: sale.idempotency_key.replace(
+        /^venta_cerrada:/,
+        'purchase:',
+      ),
       event_id: 'a0000000-0000-4000-8000-0000000000aa',
     }).expect(400);
     expect(response.body.message).toBe(
