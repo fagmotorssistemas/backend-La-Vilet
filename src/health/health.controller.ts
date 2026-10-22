@@ -32,6 +32,8 @@ export class HealthController {
       wa_crm_qualification_delivery_enabled: flags.waCrmQualification,
       /** Purchase = contacto calificado (web o WhatsApp). */
       qualified_purchase_delivery_enabled: flags.qualifiedPurchase,
+      /** Valor = precio de la unidad que manda el CRM; este es solo el respaldo. */
+      qualified_purchase_value_source: 'crm_unit_price',
       qualified_purchase_value_configured:
         this.meta.qualifiedPurchaseValue != null,
       /** VentaCerrada = venta real (solo medición). */

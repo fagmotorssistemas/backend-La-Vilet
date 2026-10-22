@@ -164,7 +164,7 @@ export class EnqueueEventDto {
   @IsUUID('4')
   sale_id?: string;
 
-  /** Importe real de VentaCerrada. En Purchase se ignora: usa el valor fijo configurado. */
+  /** Importe real de VentaCerrada; en Purchase, precio de la unidad (sin él, respaldo configurado). */
   @IsOptional()
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0.01)

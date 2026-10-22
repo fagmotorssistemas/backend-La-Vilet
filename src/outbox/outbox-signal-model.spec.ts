@@ -108,6 +108,49 @@ describe('Outbox — modelo de señales', () => {
     cleanup();
   });
 
+  it('Purchase con precio del CRM sale con ese precio, no con el respaldo', async () => {
+    const { values, events, outbox, graphCalls, cleanup } = setup({
+      META_QUALIFIED_PURCHASE_DELIVERY_ENABLED: 'true',
+      META_QUALIFIED_PURCHASE_VALUE: '5000',
+    });
+    events.enqueue(
+      dto({
+        event_name: 'Purchase',
+        unit_id: UNIT,
+        value: 244966,
+        currency: 'USD',
+      }),
+    );
+    values.META_QUALIFIED_PURCHASE_VALUE = '6500';
+    await outbox.tick();
+
+    expect(graphCalls).toHaveLength(1);
+    expect(graphCalls[0].body.data[0].custom_data).toMatchObject({
+      value: 244966,
+      currency: 'USD',
+      content_ids: [UNIT],
+      content_type: 'home_listing',
+    });
+    cleanup();
+  });
+
+  it('Purchase con precio del CRM sale aunque no haya valor de respaldo', async () => {
+    const { events, outbox, graphCalls, cleanup } = setup({
+      META_QUALIFIED_PURCHASE_DELIVERY_ENABLED: 'true',
+    });
+    events.enqueue(
+      dto({ event_name: 'Purchase', value: 132211, currency: 'USD' }),
+    );
+    await outbox.tick();
+
+    expect(graphCalls).toHaveLength(1);
+    expect(graphCalls[0].body.data[0].custom_data).toMatchObject({
+      value: 132211,
+      currency: 'USD',
+    });
+    cleanup();
+  });
+
   it('Purchase sin valor configurado se retiene 1 h sin llamar a Meta', async () => {
     const { events, outbox, graphCalls, db, cleanup } = setup({
       META_QUALIFIED_PURCHASE_DELIVERY_ENABLED: 'true',

@@ -83,7 +83,7 @@ function whatsapp(overrides: Partial<EnqueueEventDto>): EnqueueEventDto {
 }
 
 describe('Modelo de señales — Purchase calificado, VentaCerrada y embudo', () => {
-  it('Purchase web usa el valor fijo configurado e ignora el del productor', () => {
+  it('Purchase lleva el precio real de la unidad que manda el CRM', () => {
     const { service, graph, cleanup } = setup({
       META_QUALIFIED_PURCHASE_VALUE: '5000',
       META_QUALIFIED_PURCHASE_DELIVERY_ENABLED: 'true',
@@ -94,20 +94,57 @@ describe('Modelo de señales — Purchase calificado, VentaCerrada y embudo', ()
         event_name: 'Purchase',
         event_id: id,
         unit_id: UNIT,
-        value: 999999,
-        currency: 'EUR',
+        value: 185000.456,
+        currency: 'usd',
       }),
     );
     expect(res).toMatchObject({ accepted: true, delivery: 'queued' });
     const { event, row } = graph(id);
     expect(row.dataset_id).toBe('WEB_DS');
     expect(event.custom_data).toEqual({
-      value: 5000,
+      value: 185000.46,
       currency: 'USD',
       content_ids: [UNIT],
       content_type: 'home_listing',
     });
     cleanup();
+  });
+
+  it('con precio del CRM no hace falta el valor de respaldo', () => {
+    const { service, graph, cleanup } = setup({
+      META_QUALIFIED_PURCHASE_DELIVERY_ENABLED: 'true',
+    });
+    const id = eventId();
+    const res = service.enqueue(
+      web({
+        event_name: 'Purchase',
+        event_id: id,
+        value: 132211,
+        currency: 'USD',
+      }),
+    );
+    expect(res.delivery).toBe('queued');
+    expect(graph(id).event.custom_data).toMatchObject({
+      value: 132211,
+      currency: 'USD',
+    });
+    cleanup();
+  });
+
+  it('un precio inválido no se envía: queda el respaldo para el envío', () => {
+    for (const value of [0, -10, 100_000_001, Number.NaN]) {
+      const { service, graph, cleanup } = setup({
+        META_QUALIFIED_PURCHASE_VALUE: '5000',
+        META_QUALIFIED_PURCHASE_DELIVERY_ENABLED: 'true',
+      });
+      const id = eventId();
+      const res = service.enqueue(
+        web({ event_name: 'Purchase', event_id: id, value, currency: 'USD' }),
+      );
+      expect(res.delivery).toBe('queued');
+      expect(graph(id).event.custom_data?.value).toBeUndefined();
+      cleanup();
+    }
   });
 
   it('Purchase sin valor configurado se acepta pero queda retenido', () => {
@@ -150,12 +187,22 @@ describe('Modelo de señales — Purchase calificado, VentaCerrada y embudo', ()
       META_QUALIFIED_PURCHASE_VALUE: '5000',
     });
     const id = eventId();
-    service.enqueue(whatsapp({ event_name: 'Purchase', event_id: id }));
+    service.enqueue(
+      whatsapp({
+        event_name: 'Purchase',
+        event_id: id,
+        value: 285354,
+        currency: 'USD',
+      }),
+    );
     const { event, row } = graph(id);
     expect(row.dataset_id).toBe('MSG_DS');
     expect(event.action_source).toBe('business_messaging');
     expect(event.user_data.ctwa_clid).toBe('CTWA-1');
-    expect(event.custom_data).toMatchObject({ value: 5000, currency: 'USD' });
+    expect(event.custom_data).toMatchObject({
+      value: 285354,
+      currency: 'USD',
+    });
     cleanup();
   });
 

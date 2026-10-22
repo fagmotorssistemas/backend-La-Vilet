@@ -28,6 +28,7 @@ import {
   gateViewContent,
   normalizeCurrency,
   resolveHomeListingContent,
+  validQualifiedPurchaseValue,
 } from '../meta/measurement-event-gates';
 
 export type NestEventLookupResponse = {
@@ -336,14 +337,18 @@ export class EventsService {
     });
     if (!eventGate.ok) throw new BadRequestException(eventGate.reason);
 
-    // Valor en custom_data: Purchase usa el valor fijo configurado (decisión de
-    // negocio: igual para todo contacto calificado); VentaCerrada, el importe real.
+    // Valor en custom_data: Purchase lleva el precio real de la unidad que
+    // resolvió el CRM; sin precio válido, el worker aplica al enviar el valor de
+    // respaldo (META_QUALIFIED_PURCHASE_VALUE). VentaCerrada, el importe real.
     let eventValue: number | null = null;
     let eventCurrency: string | null = null;
     if (dto.event_name === 'Purchase') {
-      eventValue = this.meta.qualifiedPurchaseValue;
+      eventValue = validQualifiedPurchaseValue(dto.value);
       eventCurrency =
-        eventValue != null ? this.meta.qualifiedPurchaseCurrency : null;
+        eventValue != null
+          ? normalizeCurrency(dto.currency) ||
+            this.meta.qualifiedPurchaseCurrency
+          : null;
     } else if (dto.event_name === 'VentaCerrada') {
       eventValue = saleValueFrom(dto);
       eventCurrency = normalizeCurrency(dto.currency);
@@ -480,6 +485,7 @@ export class EventsService {
     const holdReason = this.deliveryHoldReason(
       dto.event_name,
       dto.action_source,
+      eventValue != null,
     );
 
     let delivery: string;
@@ -581,6 +587,7 @@ export class EventsService {
   private deliveryHoldReason(
     eventName: string,
     actionSource: string,
+    hasOwnValue = false,
   ): string | null {
     if (
       eventName === 'QualifiedLead' &&
@@ -592,7 +599,7 @@ export class EventsService {
       if (!this.meta.qualifiedPurchaseDeliveryEnabled) {
         return 'qualified_purchase_delivery_inactive';
       }
-      if (this.meta.qualifiedPurchaseValue == null) {
+      if (!hasOwnValue && this.meta.qualifiedPurchaseValue == null) {
         return 'qualified_purchase_value_not_configured';
       }
     }

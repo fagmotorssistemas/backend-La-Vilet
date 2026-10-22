@@ -22,7 +22,7 @@ para que las campañas salgan de "Aprendizaje limitado", sin inflar.
 | `Lead`             | Deja sus datos en la web                                                                                                 | `website`                        | `lead:{lead_id}`                                                  | —                                                                                                                           |
 | `LeadSubmitted`    | Conversa de verdad por WhatsApp (no solo "hola")                                                                         | `business_messaging`             | `wa_lead_submitted:{lead_id}`                                     | CTWA, WABA, dataset de mensajería                                                                                           |
 | `QualifiedLead`    | Primera evaluación CRM tibio/caliente                                                                                    | `business_messaging`             | `wa_crm_qualified:{lead_id}`                                      | Igual que hoy                                                                                                               |
-| **`Purchase`**     | **Contacto calificado:** tibio/caliente, pide visita o reserva, pregunta financiamiento, da cédula o presupuesto         | `website` o `business_messaging` | `purchase_qualified:{lead_id}:{unit_id\|none}`                    | `lead_id`; por WhatsApp además `contact_id` + identificadores BM. **No enviar `value`**: Nest usa el valor fijo configurado |
+| **`Purchase`**     | **Contacto calificado:** tibio/caliente, pide visita o reserva, pregunta financiamiento, da cédula o presupuesto         | `website` o `business_messaging` | `purchase_qualified:{lead_id}:{unit_id\|none}`                    | `lead_id`; por WhatsApp además `contact_id` + identificadores BM. `value` = precio de la unidad (ver abajo); sin precio, Nest usa el respaldo |
 | **`VentaCerrada`** | Firma de la venta (CRM)                                                                                                  | `system_generated`               | `venta_cerrada:{sale_id}`                                         | `sale_id`, `lead_id`, `unit_id`, `value`, `currency`, `registered_at`, `sale_at`; `event_time = floor(epoch(sale_at))`      |
 | `Schedule`         | Cita web confirmada                                                                                                      | `website`                        | `schedule:{appointment_id}`                                       | Sin cambios (Meta no acepta Schedule por WhatsApp)                                                                          |
 | `AddToWishlist`    | Legado                                                                                                                   | `website`                        | `wishlist:{lead_id}:{unit_id}`                                    | Se mantiene por compatibilidad; el favorito nuevo es `InitiateCheckout`                                                     |
@@ -33,6 +33,25 @@ Reglas comunes:
 - Siempre con la unidad cuando existe: es lo que alimenta el catálogo inmobiliario.
 - Por WhatsApp, Meta no admite `Search`, `Lead` (usar `LeadSubmitted`) ni `Schedule`.
 - `Purchase` con `action_source=system_generated` se rechaza
+
+### Valor del `Purchase` (contacto calificado)
+
+Precio real de la unidad, resuelto en Supabase al crear el evento
+(`lv_qualified_purchase_price`), en este orden:
+
+1. La unidad ligada a la persona en el CRM (`lead_units`, no rechazada).
+2. Lo asignado a mano al anuncio en Marketing (`meta_ad_promoted_units`): una
+   unidad → su precio; varias → promedio. Propiedad externa → promedio del proyecto.
+3. La detección automática del anuncio (`meta_ad_unit_detection`, cron del CRM
+   cada 15 min): enlace a la unidad o unidad en el nombre ("Suite 201", "PH 601",
+   "LC-05") → su precio; solo el tipo ("Suites") → promedio de ese tipo.
+4. Promedio del proyecto.
+
+Solo precios publicados (> 0); los promedios usan unidades disponibles. Con unidad,
+el evento lleva el catálogo (`home_listing` + `content_ids=[unit_id]`). Nest valida
+el precio (> 0, máx. 100.000.000, 2 decimales) y, si falta, usa
+`META_QUALIFIED_PURCHASE_VALUE`. El origen queda en el payload de Supabase
+(`lv_value_source`), no se envía a Meta.
   (`purchase_is_qualified_contact_use_venta_cerrada`): la venta va como `VentaCerrada`.
 
 ## Cascada (opcional, `META_SIGNAL_CASCADE_ENABLED`)
@@ -57,7 +76,7 @@ generó, se envían dos.
 | Variable                                                | Controla                                                                                           |
 | ------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
 | `META_QUALIFIED_PURCHASE_DELIVERY_ENABLED`              | Envío de `Purchase` (contacto calificado)                                                          |
-| `META_QUALIFIED_PURCHASE_VALUE` / `_CURRENCY`           | Valor fijo por contacto calificado (moneda por defecto USD). Sin valor, el Purchase queda retenido |
+| `META_QUALIFIED_PURCHASE_VALUE` / `_CURRENCY`           | Respaldo solo para un Purchase sin precio (moneda por defecto USD). Sin precio ni respaldo, queda retenido |
 | `META_SALE_DELIVERY_ENABLED` / `META_SALE_ACTIVATED_AT` | Envío de `VentaCerrada` y su corte (ISO)                                                           |
 | `META_FUNNEL_EVENTS_DELIVERY_ENABLED`                   | `Search`, `InitiateCheckout` y `ViewContent` por WhatsApp                                          |
 | `META_SIGNAL_CASCADE_ENABLED`                           | Cascada                                                                                            |

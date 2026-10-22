@@ -7,8 +7,10 @@
    QualifiedLead: `META_WA_CRM_QUALIFICATION_DELIVERY_ENABLED`; solo primera
    evaluación CRM persistida `tibio|caliente`, con identidad `wa_crm_qualified:{lead_id}`.
    Purchase = **contacto calificado** (no la venta): `website` o `business_messaging`,
-   `lead_id` obligatorio, valor fijo `META_QUALIFIED_PURCHASE_VALUE` (no inventar; sin
-   valor queda retenido). Entrega: `META_QUALIFIED_PURCHASE_DELIVERY_ENABLED`.
+   `lead_id` obligatorio. Valor = precio real de la unidad que resuelve Supabase
+   (`lv_qualified_purchase_price`: unidad pedida → anuncio → detección → promedio);
+   `META_QUALIFIED_PURCHASE_VALUE` solo es respaldo sin precio (no inventar; sin
+   ninguno queda retenido). Entrega: `META_QUALIFIED_PURCHASE_DELIVERY_ENABLED`.
    VentaCerrada = venta real (solo medición): `META_SALE_DELIVERY_ENABLED` +
    `META_SALE_ACTIVATED_AT` (ISO). Elegibilidad: `registered_at` Y `sale_at` ambos ≥ corte.
    `action_source=system_generated` (cierre CRM); clave `venta_cerrada:{sale_id}`.

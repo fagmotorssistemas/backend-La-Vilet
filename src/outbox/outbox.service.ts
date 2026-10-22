@@ -24,6 +24,10 @@ import {
   saleIdFromPurchaseRow,
 } from '../meta/purchase-annulment-gate';
 import { evaluatePurchaseActivationGate } from '../meta/purchase-activation-cutover';
+import {
+  normalizeCurrency,
+  validQualifiedPurchaseValue,
+} from '../meta/measurement-event-gates';
 import { decideWaLeadSubmittedConsentGate } from '../meta/wa-lead-submitted-consent-gate';
 
 @Injectable()
@@ -383,19 +387,37 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
    * Inyecta en cada evento el valor fijo configurado para el contacto
    * calificado. Devuelve false si no hay valor/moneda: el evento se retiene.
    */
+  /**
+   * Valor del contacto calificado: el precio real que resolvió el CRM (unidad,
+   * promedio del tipo o del proyecto). Un evento sin precio válido toma el valor
+   * de respaldo vigente (META_QUALIFIED_PURCHASE_VALUE); sin ninguno, se retiene.
+   */
   private applyQualifiedPurchaseValue(payload: Record<string, unknown>) {
-    const value = this.meta.qualifiedPurchaseValue;
-    const currency = this.meta.qualifiedPurchaseCurrency;
+    const fallback = this.meta.qualifiedPurchaseValue;
+    const fallbackCurrency = this.meta.qualifiedPurchaseCurrency;
     const events = Array.isArray(payload.data)
       ? (payload.data as Array<Record<string, unknown>>)
       : [];
-    if (value == null || !currency || !events.length) return false;
+    if (!events.length) return false;
     for (const event of events) {
       const custom =
         event.custom_data && typeof event.custom_data === 'object'
           ? (event.custom_data as Record<string, unknown>)
           : {};
-      event.custom_data = { ...custom, value, currency };
+      const own = validQualifiedPurchaseValue(custom.value);
+      const ownCurrency = normalizeCurrency(
+        typeof custom.currency === 'string' ? custom.currency : null,
+      );
+      if (own != null && ownCurrency) {
+        event.custom_data = { ...custom, value: own, currency: ownCurrency };
+        continue;
+      }
+      if (fallback == null || !fallbackCurrency) return false;
+      event.custom_data = {
+        ...custom,
+        value: fallback,
+        currency: fallbackCurrency,
+      };
     }
     return true;
   }

@@ -84,9 +84,28 @@ export const SEARCH_MAX_CONTENT_IDS = 10;
  * anuncios Click-to-WhatsApp, por eso necesita volumen.
  * - Canal: website (360/formulario) o business_messaging (WhatsApp).
  * - lead_id obligatorio: siempre es una persona ya identificada.
- * - El valor es fijo y viene de configuración (META_QUALIFIED_PURCHASE_VALUE).
+ * - Valor = precio real de la unidad que resuelve el CRM (la que pidió la
+ *   persona, la del anuncio o la detectada; si no, promedio del tipo o del
+ *   proyecto). META_QUALIFIED_PURCHASE_VALUE es solo el respaldo sin precio.
  * La venta real es VentaCerrada.
  */
+/** Tope de cordura para el precio que manda el CRM (unidades inmobiliarias). */
+export const MAX_QUALIFIED_PURCHASE_VALUE = 100_000_000;
+
+/** Precio válido del contacto calificado (> 0, con tope); null si no sirve. */
+export function validQualifiedPurchaseValue(raw: unknown): number | null {
+  const n =
+    typeof raw === 'number'
+      ? raw
+      : typeof raw === 'string' && raw.trim()
+        ? Number(raw)
+        : Number.NaN;
+  if (!Number.isFinite(n) || n <= 0 || n > MAX_QUALIFIED_PURCHASE_VALUE) {
+    return null;
+  }
+  return Math.round(n * 100) / 100;
+}
+
 export function gateQualifiedPurchase(input: {
   actionSource: string;
   leadId?: string | null;
