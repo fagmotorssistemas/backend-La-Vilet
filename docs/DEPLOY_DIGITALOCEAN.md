@@ -37,6 +37,25 @@ Vercel (Next.js)  --META_CAPI_INTERNAL_SECRET-->  DigitalOcean (lavilet-meta-cap
 
 ## 4. Droplet + Docker Compose
 
+### Despliegue recomendado: `operations/deploy-droplet.sh`
+
+Ejecutar en el droplet (consola web de DigitalOcean o SSH, puerto 2222):
+
+```bash
+cd /opt/lavilet-meta-capi && git fetch origin \
+  && git show origin/main:operations/deploy-droplet.sh > /tmp/deploy-droplet.sh
+bash /tmp/deploy-droplet.sh                    # fase 1: solo revisa, no cambia nada
+CONFIRM_DEPLOY=1 bash /tmp/deploy-droplet.sh   # fase 2: respalda, despliega y verifica
+```
+
+La fase 2 respalda la cola SQLite (copia íntegra en `/root/lavilet-capi-backups`),
+despliega `origin/main` con `-p lavilet-capi`, espera a que `/api/health` responda
+con la versión nueva y un ciclo limpio de worker y drain, y si algo falla vuelve
+sola a la versión anterior. Ensayado en local con la versión de producción,
+incluida la vuelta atrás forzando una versión rota.
+
+### Manual
+
 Usar siempre el nombre de proyecto del stack existente (`-p lavilet-capi`).
 Sin `-p`, compose toma el nombre de la carpeta y crea **otro volumen `/data`
 vacío** (cola SQLite nueva). Antes del primer despliegue, confirmar el nombre:

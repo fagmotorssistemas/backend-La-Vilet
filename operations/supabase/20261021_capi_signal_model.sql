@@ -1,5 +1,7 @@
 -- Modelo de señales CAPI (2026-10-21). Ver docs/CAPI_SIGNAL_MODEL_20261021.md.
--- NO aplicado. Copiar a las migraciones del frontend y aplicar con aprobación.
+-- APLICADO en producción (Supabase xhjnyntywqhczdtecgim) el 2026-10-22 como
+-- migración 20261022003647_capi_signal_model_event_names_and_stages.
+-- Copiar también a las migraciones del frontend para que el repo lo refleje.
 -- Idempotente: se puede ejecutar más de una vez.
 begin;
 

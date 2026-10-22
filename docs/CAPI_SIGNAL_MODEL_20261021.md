@@ -67,8 +67,8 @@ efecto; `/api/health` los lista en `deprecated_env_present` y el worker avisa al
 
 ## Supabase (requisito antes de que el frontend produzca eventos nuevos)
 
-Aplicar `operations/supabase/20261021_capi_signal_model.sql` (copiar a las
-migraciones del frontend). Amplía los CHECK de `meta_capi_outbox.event_name`
+Aplicada en producción el 2026-10-22 (`20261022003647_capi_signal_model_event_names_and_stages`).
+Falta copiar `operations/supabase/20261021_capi_signal_model.sql` a las migraciones del frontend. Amplía los CHECK de `meta_capi_outbox.event_name`
 y de `meta_capi_conversion_log.stage` (hoy rechaza `transport_failed` y
 `meta_unverified`, que Nest sí reporta).
 
