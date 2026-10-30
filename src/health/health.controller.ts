@@ -1,5 +1,8 @@
-import { Controller, Get } from '@nestjs/common';
+import { Controller, Get, Req } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import type { Request } from 'express';
+import { hasValidInternalSecret } from '../auth/auth.module';
+import { parseBoolFlag } from '../common/utils/env-flags';
 import { readDeliveryFlags } from '../meta/delivery-flags';
 import { MetaCapiService } from '../meta/meta-capi.service';
 import { DatabaseService } from '../database/database.service';
@@ -48,8 +51,29 @@ export class HealthController {
     };
   }
 
+  /**
+   * HEALTH_DETAILS_PUBLIC=false: público solo { ok, service, mode }. El detalle
+   * (interruptores, colas, webhook) pide el secreto interno, salvo el
+   * HEALTHCHECK dentro del contenedor. Por defecto (true) responde como antes,
+   * para no romper los scripts del droplet que leen el detalle sin secreto.
+   */
   @Get()
-  getHealth() {
+  getHealth(@Req() req: Request) {
+    if (!this.canSeeDetails(req)) {
+      return { ok: true, service: 'lavilet-meta-capi', mode: this.meta.mode };
+    }
+    return this.healthDetails();
+  }
+
+  private canSeeDetails(req: Request): boolean {
+    if (parseBoolFlag(this.config.get<string>('HEALTH_DETAILS_PUBLIC'), true)) {
+      return true;
+    }
+    if (hasValidInternalSecret(req, this.config)) return true;
+    return isDirectLoopback(req);
+  }
+
+  private healthDetails() {
     const gate = this.meta.assertSendAllowed();
     return {
       ok: true,
@@ -83,4 +107,16 @@ export class HealthController {
       wa_cloud_webhook: this.waWebhook.healthSnapshot(),
     };
   }
+}
+
+/**
+ * Petición desde el propio contenedor (HEALTHCHECK de Docker) y sin cabeceras
+ * de proxy. Lo que llega por el puerto publicado entra desde la red de Docker.
+ */
+export function isDirectLoopback(req: Request): boolean {
+  if (req.headers['x-forwarded-for'] || req.headers['x-real-ip']) return false;
+  const remote = String(req.socket?.remoteAddress || '');
+  return (
+    remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1'
+  );
 }

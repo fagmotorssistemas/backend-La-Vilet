@@ -1,6 +1,6 @@
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
-import { mkdtempSync, readFileSync, rmSync } from 'fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import request from 'supertest';
@@ -16,14 +16,23 @@ type Fixture = Record<string, unknown> & {
   delivery_lane: 'test' | 'live';
 };
 
-describe('contrato frontend/backend conciliado (integración aislada)', () => {
+// Datos de prueba del repo del sitio (LaviletRealStateProyect/docs).
+// CAPI_FRONTEND_FIXTURES=<ruta>/CAPI_LOCAL_TEST_PAYLOADS.json
+const FIXTURES_PATH =
+  process.env.CAPI_FRONTEND_FIXTURES ||
+  'D:/FrontLaVilet/docs/CAPI_LOCAL_TEST_PAYLOADS.json';
+const describeContract = existsSync(FIXTURES_PATH) ? describe : describe.skip;
+if (!existsSync(FIXTURES_PATH)) {
+  console.warn(
+    `[capi-contract] omitida: no existe ${FIXTURES_PATH}. Definir CAPI_FRONTEND_FIXTURES.`,
+  );
+}
+const TITLE = 'contrato frontend/backend conciliado (integración aislada)';
+
+describeContract(TITLE, () => {
   const secret = 'integration-local-secret';
   const rawFixtures = JSON.parse(
-    readFileSync(
-      process.env.CAPI_FRONTEND_FIXTURES ||
-        'D:/FrontLaVilet/docs/CAPI_LOCAL_TEST_PAYLOADS.json',
-      'utf8',
-    ),
+    readFileSync(FIXTURES_PATH, 'utf8'),
   ) as Fixture[];
   // Contrato 2026-10: la venta real es VentaCerrada y Purchase es el contacto
   // calificado. Acepta fixtures del frontend en ambos formatos: si aún publica la
@@ -57,6 +66,8 @@ describe('contrato frontend/backend conciliado (integración aislada)', () => {
     process.env.META_MODE = 'test';
     process.env.META_TEST_EVENT_CODE = 'LOCAL_ONLY';
     process.env.META_DATASET_ID = 'WEB_DATASET_TEST_ONLY';
+    // Los fixtures usan event_time fijos (pueden tener más de 7 días).
+    process.env.META_EVENT_MAX_AGE_CHECK_ENABLED = 'false';
     process.env.META_CAPI_ACCESS_TOKEN = 'local-web-placeholder';
     process.env.META_WA_CAPI_ACCESS_TOKEN = 'local-wa-placeholder';
     process.env.META_WABA_ID = 'WABA_TEST_ONLY';

@@ -14,7 +14,7 @@ services:
       META_MODE: ${META_MODE:-disabled}
       META_DATASET_ID: ${META_DATASET_ID:-923439043758658}
       META_PIXEL_ID: ${META_PIXEL_ID:-923439043758658}
-      META_API_VERSION: ${META_API_VERSION:-v21.0}
+      META_API_VERSION: ${META_API_VERSION:-v26.0}
       META_WA_API_VERSION: ${META_WA_API_VERSION:-v26.0}
       META_CAPI_ACCESS_TOKEN: ${META_CAPI_ACCESS_TOKEN:-}
       # Token WA BM (LeadSubmitted). Distinto del token web; no reutilizar META_CAPI_ACCESS_TOKEN.
@@ -41,6 +41,10 @@ services:
       OUTBOX_MAX_ATTEMPTS: ${OUTBOX_MAX_ATTEMPTS:-8}
       OUTBOX_RETENTION_DAYS: ${OUTBOX_RETENTION_DAYS:-90}
       META_HTTP_TIMEOUT_MS: ${META_HTTP_TIMEOUT_MS:-10000}
+      # Meta rechaza eventos de más de 7 días: se descartan antes de Graph.
+      META_EVENT_MAX_AGE_CHECK_ENABLED: ${META_EVENT_MAX_AGE_CHECK_ENABLED:-true}
+      # true = /api/health muestra el detalle sin secreto (como antes).
+      HEALTH_DETAILS_PUBLIC: ${HEALTH_DETAILS_PUBLIC:-true}
       # Antes no se pasaban al contenedor (quedaban en su default). Revisar el
       # .env del droplet antes de desplegar: ahora sí se aplican.
       META_CORE_SETUP_CONSERVATIVE: ${META_CORE_SETUP_CONSERVATIVE:-true}

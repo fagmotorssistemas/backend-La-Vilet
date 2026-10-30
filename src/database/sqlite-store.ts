@@ -201,6 +201,10 @@ export class SqliteOutboxStore {
         `ALTER TABLE outbox_events ADD COLUMN hold_count INTEGER NOT NULL DEFAULT 0`,
       );
     }
+    if (!names.has('purged_at')) {
+      // Retención sin borrar: marca las filas adelgazadas por purgeOld.
+      this.db.exec(`ALTER TABLE outbox_events ADD COLUMN purged_at TEXT`);
+    }
     this.db
       .prepare(
         `INSERT OR IGNORE INTO schema_migrations (id) VALUES ('010_outbox_hold_backoff')`,
@@ -1415,11 +1419,38 @@ export class SqliteOutboxStore {
     return out;
   }
 
+  /**
+   * Retención: las filas enviadas se adelgazan, no se borran. Se vacía el body
+   * Graph (datos hasheados) y del payload interno solo quedan los campos que
+   * deciden idempotencia y cascada. Así una clave ya enviada sigue siendo
+   * duplicate y no vuelve a salir a Meta como evento nuevo.
+   */
   purgeOld(retentionDays: number) {
     this.db
       .prepare(
-        `DELETE FROM outbox_events
+        `UPDATE outbox_events
+         SET graph_payload = '{}',
+             payload_redacted = CASE
+               WHEN json_valid(payload_redacted) THEN json_object(
+                 'lead_id', json_extract(payload_redacted, '$.lead_id'),
+                 'unit_id', json_extract(payload_redacted, '$.unit_id'),
+                 'sale_id', json_extract(payload_redacted, '$.sale_id'),
+                 'value', json_extract(payload_redacted, '$.value'),
+                 'currency', json_extract(payload_redacted, '$.currency'),
+                 'temperature', json_extract(payload_redacted, '$.temperature'),
+                 'evidence_labels', CASE
+                   WHEN json_type(payload_redacted, '$.evidence_labels') = 'array'
+                     THEN json(json_extract(payload_redacted, '$.evidence_labels'))
+                   ELSE NULL
+                 END,
+                 'qualification_source', json_extract(payload_redacted, '$.qualification_source')
+               )
+               ELSE '{}'
+             END,
+             purged_at = datetime('now'),
+             updated_at = datetime('now')
          WHERE status = 'sent'
+           AND purged_at IS NULL
            AND sent_at IS NOT NULL
            AND sent_at < datetime('now', @offset)`,
       )

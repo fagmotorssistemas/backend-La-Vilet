@@ -37,6 +37,8 @@ describe('lavilet-meta-capi (e2e)', () => {
     dir = mkdtempSync(join(tmpdir(), 'lavilet-capi-e2e-'));
     process.env.META_MODE = 'disabled';
     process.env.META_DATASET_ID = '923439043758658';
+    // Los fixtures usan event_time fijos (pueden tener más de 7 días).
+    process.env.META_EVENT_MAX_AGE_CHECK_ENABLED = 'false';
     process.env.META_CAPI_ACCESS_TOKEN = '';
     process.env.META_WA_CAPI_ACCESS_TOKEN = '';
     process.env.META_TEST_EVENT_CODE = '';
