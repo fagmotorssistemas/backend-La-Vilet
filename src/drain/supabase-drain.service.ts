@@ -16,6 +16,7 @@ import {
   inactiveEventNames,
   readDeliveryFlags,
 } from '../meta/delivery-flags';
+import { EVENT_TIME_TOO_OLD, isEventTimeTooOld } from '../meta/event-age';
 import { DatabaseService } from '../database/database.service';
 import { holdBackoffSeconds } from '../database/sqlite-store';
 import { EnqueueEventDto } from '../events/dto/enqueue-event.dto';
@@ -208,6 +209,22 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
         `drain skip non_pending status=${row.status} event_id=${row.event_id}`,
       );
       return 'held';
+    }
+    // Vencido (> 7 días): Meta lo rechazaría. No se copia a Nest.
+    if (
+      this.meta.eventMaxAgeCheckEnabled &&
+      isEventTimeTooOld(row.event_time)
+    ) {
+      try {
+        await this.markSupabase(row.id, 'needs_review', EVENT_TIME_TOO_OLD);
+      } catch {
+        // La fila sigue pending; se reintenta tras la espera.
+        return 'held';
+      }
+      this.logger.warn(
+        `drain needs_review ${EVENT_TIME_TOO_OLD} event_id=${row.event_id}`,
+      );
+      return 'needs_review';
     }
     // Flujos con entrega apagada ya se excluyen en la consulta; defensa extra
     // (ViewContent por WhatsApp solo se distingue por el payload).
@@ -1115,6 +1132,10 @@ export class SupabaseDrainService implements OnModuleInit, OnModuleDestroy {
           : undefined,
       phone: typeof payload.phone === 'string' ? payload.phone : undefined,
       email: typeof payload.email === 'string' ? payload.email : undefined,
+      first_name:
+        typeof payload.first_name === 'string' ? payload.first_name : undefined,
+      last_name:
+        typeof payload.last_name === 'string' ? payload.last_name : undefined,
       full_name:
         typeof payload.full_name === 'string' ? payload.full_name : undefined,
       city: typeof payload.city === 'string' ? payload.city : undefined,

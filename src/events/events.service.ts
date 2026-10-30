@@ -30,6 +30,7 @@ import {
   resolveHomeListingContent,
   validQualifiedPurchaseValue,
 } from '../meta/measurement-event-gates';
+import { EVENT_TIME_TOO_OLD, isEventTimeTooOld } from '../meta/event-age';
 
 export type NestEventLookupResponse = {
   ok: true;
@@ -208,6 +209,15 @@ export class EventsService {
   ): EnqueueResponse {
     if (!dto.ads_consent) {
       throw new BadRequestException('ads_consent requerido y debe ser true');
+    }
+
+    // Meta rechazaría la petición entera: no se encola un evento ya vencido.
+    if (
+      this.meta.eventMaxAgeCheckEnabled &&
+      dto.event_time != null &&
+      isEventTimeTooOld(dto.event_time)
+    ) {
+      throw new BadRequestException(EVENT_TIME_TOO_OLD);
     }
 
     if (
@@ -589,6 +599,16 @@ export class EventsService {
     actionSource: string,
     hasOwnValue = false,
   ): string | null {
+    // Mismas reglas que delivery-flags.ts (worker y drain).
+    if (eventName === 'Schedule' && !this.meta.scheduleDeliveryEnabled) {
+      return 'schedule_delivery_inactive';
+    }
+    if (
+      eventName === 'LeadSubmitted' &&
+      !this.meta.waLeadSubmittedDeliveryEnabled
+    ) {
+      return 'wa_lead_submitted_delivery_inactive';
+    }
     if (
       eventName === 'QualifiedLead' &&
       !this.meta.waCrmQualificationDeliveryEnabled
@@ -785,7 +805,9 @@ export function deterministicUuidV4(seed: string): string {
 
 /**
  * Un reintento con la misma clave debe describir el mismo hecho. Compara los
- * campos que cambian su significado (no el valor del Purchase: viene de config).
+ * campos que cambian su significado. En Purchase no se compara el valor: lo
+ * resuelve el CRM (precio de la unidad) y puede variar entre reintentos; manda
+ * el primero que se encoló.
  */
 function storedPayloadConflicts(
   storedJson: string,

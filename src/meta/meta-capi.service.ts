@@ -100,7 +100,8 @@ export class MetaCapiService {
   }
 
   get apiVersion(): string {
-    return this.config.get<string>('META_API_VERSION')?.trim() || 'v21.0';
+    // v21.0 se retira el 21 ene 2027: por defecto la misma versión que WhatsApp.
+    return this.config.get<string>('META_API_VERSION')?.trim() || 'v26.0';
   }
 
   /**
@@ -143,6 +144,30 @@ export class MetaCapiService {
   get waCrmQualificationDeliveryEnabled(): boolean {
     return parseBoolFlag(
       this.config.get<string>('META_WA_CRM_QUALIFICATION_DELIVERY_ENABLED'),
+    );
+  }
+
+  /** Schedule (cita web). Misma clave que readDeliveryFlags. */
+  get scheduleDeliveryEnabled(): boolean {
+    return parseBoolFlag(
+      this.config.get<string>('META_SCHEDULE_DELIVERY_ENABLED'),
+    );
+  }
+
+  /** LeadSubmitted por WhatsApp. Misma clave que readDeliveryFlags. */
+  get waLeadSubmittedDeliveryEnabled(): boolean {
+    return parseBoolFlag(
+      this.config.get<string>('META_WA_LEAD_SUBMITTED_DELIVERY_ENABLED'),
+    );
+  }
+
+  /**
+   * Meta rechaza eventos con event_time de más de 7 días. Con este interruptor,
+   * el servicio los descarta antes de llamar a Graph (no cambia event_time).
+   */
+  get eventMaxAgeCheckEnabled(): boolean {
+    return parseBoolFlag(
+      this.config.get<string>('META_EVENT_MAX_AGE_CHECK_ENABLED'),
     );
   }
 

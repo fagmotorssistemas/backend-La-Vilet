@@ -29,6 +29,7 @@ import {
   validQualifiedPurchaseValue,
 } from '../meta/measurement-event-gates';
 import { decideWaLeadSubmittedConsentGate } from '../meta/wa-lead-submitted-consent-gate';
+import { EVENT_TIME_TOO_OLD, isEventTimeTooOld } from '../meta/event-age';
 
 @Injectable()
 export class OutboxService implements OnModuleInit, OnModuleDestroy {
@@ -159,6 +160,16 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
       })
     ) {
       this.db.cancelProcessingIfRevoked(row.id);
+      return;
+    }
+
+    // Vencido (> 7 días): Meta lo rechazaría. Se descarta sin llamar a Graph,
+    // antes de cualquier retención, para que no quede reintentándose sin fin.
+    if (
+      this.meta.eventMaxAgeCheckEnabled &&
+      isEventTimeTooOld(fresh.event_time)
+    ) {
+      this.markEventTooOld(fresh);
       return;
     }
 
@@ -380,6 +391,43 @@ export class OutboxService implements OnModuleInit, OnModuleDestroy {
     }
     this.logger.warn(
       `outbox id=${row.id} event=${row.event_name} attempt=${attempts} dead=${dead}`,
+    );
+  }
+
+  /** Marca dead un evento vencido y deja su resultado para Supabase. */
+  private markEventTooOld(row: OutboxRow) {
+    const next = new Date().toISOString();
+    const syncPayload = this.metaResultSyncPayload({
+      stage: 'meta_rejected',
+      eventName: row.event_name,
+      eventId: row.event_id,
+      leadId: row.lead_id,
+      idempotencyKey: row.idempotency_key,
+      deliveryLane: row.delivery_lane,
+      datasetId: row.dataset_id,
+      fbtraceId: null,
+      eventsReceived: null,
+      httpStatus: 0,
+      expectedEvents: 0,
+      correlated: false,
+      reason: EVENT_TIME_TOO_OLD,
+    });
+    const local = { local_reject: EVENT_TIME_TOO_OLD };
+    if (typeof this.db.markRetryAndQueueResult === 'function') {
+      this.db.markRetryAndQueueResult(
+        row.id,
+        EVENT_TIME_TOO_OLD,
+        next,
+        true,
+        'meta_rejected',
+        local,
+        syncPayload,
+      );
+    } else {
+      this.db.markRetry(row.id, EVENT_TIME_TOO_OLD, next, true);
+    }
+    this.logger.warn(
+      `outbox dead ${EVENT_TIME_TOO_OLD} id=${row.id} event=${row.event_name} event_time=${row.event_time}`,
     );
   }
 
